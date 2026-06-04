@@ -1,6 +1,6 @@
 module github.com/luisgf/ssh-broker
 
-go 1.26.3
+go 1.23
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
