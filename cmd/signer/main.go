@@ -231,7 +231,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	// de grupo, el host solicitado debe pertenecer a alguno de sus grupos.
 	if hostSet, restricted := signer.HostSetForCaller(caller, hosts, callers); restricted {
 		if _, ok := hostSet[req.Host]; !ok {
-			s.auditEmission(caller, req, 0, "denied", fmt.Errorf("host %q fuera del grupo para %q", req.Host, caller))
+			s.auditEmission(caller, req, hosts, 0, "denied", fmt.Errorf("host %q fuera del grupo para %q", req.Host, caller))
 			http.Error(w, "host no autorizado", http.StatusForbidden)
 			return
 		}
@@ -251,12 +251,12 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	}
 	issued, err := local.SignIntent(in)
 	if err != nil {
-		s.auditEmission(caller, req, 0, "denied", err)
+		s.auditEmission(caller, req, hosts, 0, "denied", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
-	s.auditEmission(caller, req, issued.Serial, "issued", nil)
+	s.auditEmission(caller, req, hosts, issued.Serial, "issued", nil)
 	resp := signer.WireResponse{
 		Certificate:     string(ssh.MarshalAuthorizedKey(issued.Certificate)),
 		Serial:          issued.Serial,
@@ -353,7 +353,7 @@ func (s *server) auditReload(caller string, hosts int, outcome string, err error
 	_ = s.audit.Append(e)
 }
 
-func (s *server) auditEmission(caller string, req signer.WireRequest, serial uint64, outcome string, err error) {
+func (s *server) auditEmission(caller string, req signer.WireRequest, hosts signer.PolicyTable, serial uint64, outcome string, err error) {
 	cmd := "role=" + req.Role + " purpose=" + req.Purpose
 	if req.Sudo {
 		u := req.SudoUser
@@ -365,12 +365,23 @@ func (s *server) auditEmission(caller string, req signer.WireRequest, serial uin
 	if req.PTY {
 		cmd += " pty=1"
 	}
+	// Usar la dirección real (FQDN) y los metadatos de la política en lugar del
+	// nombre lógico, que no identifica unívocamente el destino en el log.
+	host := req.Host
+	var user, principal string
+	if hp, ok := hosts[req.Host]; ok {
+		host = hp.Addr
+		user = hp.User
+		principal = hp.Principal
+	}
 	e := audit.Entry{
-		Caller:  caller,
-		Host:    req.Host,
-		Command: cmd,
-		Serial:  serial,
-		Outcome: outcome,
+		Caller:    caller,
+		Host:      host,
+		User:      user,
+		Principal: principal,
+		Command:   cmd,
+		Serial:    serial,
+		Outcome:   outcome,
 	}
 	if err != nil {
 		e.Err = err.Error()
