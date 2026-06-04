@@ -1,5 +1,11 @@
 # Changelog
 
+## [v1.1.1] - 2026-06-04
+
+### Fixed
+- Auditoría del signer: el campo `host` ahora registra el FQDN/addr real (`hp.Addr`) en lugar del nombre lógico corto
+- Auditoría del signer: los campos `user` y `principal` ahora se rellenan correctamente en eventos `issued` y `denied`
+
 ## [v1.1.0] - 2026-06-04
 
 ### Added
