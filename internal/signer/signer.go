@@ -52,6 +52,17 @@ type Intent struct {
 
 	// PTY: solicita permit-pty en el certificado.
 	PTY bool
+
+	// EndUser es la identidad del usuario final que originó la petición (p. ej. el
+	// sub/preferred_username de un token OIDC en el frontend HTTP). Vacío cuando la
+	// petición no porta identidad de usuario (stdio local o frontend mTLS). Se usa
+	// para trazabilidad (KeyID/auditoría); no sustituye a Caller (la identidad del
+	// broker frente al signer).
+	EndUser string
+	// EndUserGroups son los grupos RBAC aseverados para el usuario final. Si no es
+	// nil, activa la autorización por usuario: el host solicitado debe pertenecer a
+	// alguno de estos grupos. Si es nil, no se aplica filtro por usuario (compat).
+	EndUserGroups []string
 }
 
 // Issued es el resultado de firmar.
@@ -120,6 +131,12 @@ func (p PolicyTable) Resolve(in Intent, defaultMaxTTL time.Duration) (ca.Constra
 	if !callerAllowed(hp.AllowedCallers, in.Caller) {
 		return ca.Constraints{}, "", fmt.Errorf("llamante %q no autorizado para %q", in.Caller, in.Host)
 	}
+	// RBAC por usuario final: si la petición porta grupos del usuario (frontend
+	// OIDC), el host debe pertenecer a alguno de ellos. Si EndUserGroups es nil no
+	// se aplica filtro (peticiones sin identidad de usuario: stdio/mTLS).
+	if in.EndUserGroups != nil && !groupsIntersect(hp.Groups, in.EndUserGroups) {
+		return ca.Constraints{}, "", fmt.Errorf("usuario %q no autorizado para %q (grupos)", in.EndUser, in.Host)
+	}
 	if in.Role == RoleBastion && !hp.AllowAsBastion {
 		return ca.Constraints{}, "", fmt.Errorf("host %q no permitido como bastión", in.Host)
 	}
@@ -150,6 +167,9 @@ func (p PolicyTable) Resolve(in Intent, defaultMaxTTL time.Duration) (ca.Constra
 		fmt.Sprintf("host=%s", in.Host),
 		fmt.Sprintf("role=%s", in.Role),
 		fmt.Sprintf("t=%d", time.Now().Unix()),
+	}
+	if in.EndUser != "" {
+		keyIDParts = append(keyIDParts, fmt.Sprintf("user=%s", in.EndUser))
 	}
 	if elevationPrefix != "" {
 		keyIDParts = append(keyIDParts, fmt.Sprintf("elev=%s", elevationPrefix))
@@ -239,6 +259,19 @@ func sudoUserAllowed(allowed []string, user string) bool {
 	for _, a := range allowed {
 		if a == user {
 			return true
+		}
+	}
+	return false
+}
+
+// groupsIntersect indica si hostGroups y userGroups comparten al menos un grupo.
+// Un host sin grupos no es accesible por RBAC de usuario.
+func groupsIntersect(hostGroups, userGroups []string) bool {
+	for _, hg := range hostGroups {
+		for _, ug := range userGroups {
+			if hg == ug {
+				return true
+			}
 		}
 	}
 	return false

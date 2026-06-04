@@ -141,9 +141,9 @@ type SessionResult struct {
 //   - shell: un /bin/sh con estado (cd, variables). Con sudo, el shell completo
 //     se lanza bajo sudo (sesión elevada).
 //   - pty:   igual que shell pero con PTY (permit-pty en el cert).
-func (e *Engine) OpenSession(caller, host, mode string, ttlSeconds int, opts ExecOptions) (*SessionResult, error) {
+func (e *Engine) OpenSession(c Caller, host, mode string, ttlSeconds int, opts ExecOptions) (*SessionResult, error) {
 	if _, ok := e.hostInfo(host); !ok {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Outcome: "denied", Err: "host desconocido"})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "denied", Err: "host desconocido"})
 		return nil, fmt.Errorf("host desconocido: %q", host)
 	}
 	if mode == "" {
@@ -158,19 +158,19 @@ func (e *Engine) OpenSession(caller, host, mode string, ttlSeconds int, opts Exe
 		opts.PTY = true
 	}
 
-	hops, serial, elevPrefix, err := e.buildHopsWithPrefix(host, e.ttlFor(ttlSeconds), signer.PurposeSession, opts)
+	hops, serial, elevPrefix, err := e.buildHopsWithPrefix(c, host, e.ttlFor(ttlSeconds), signer.PurposeSession, opts)
 	if err != nil {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Outcome: "error", Err: err.Error()})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "error", Err: err.Error()})
 		return nil, err
 	}
 	conn, err := sshrun.Dial(hops, 0)
 	if err != nil {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
 		return nil, fmt.Errorf("conexión: %w", err)
 	}
 
 	s := &liveSession{
-		id: newSessionID(), caller: caller, host: host, serial: serial, mode: mode,
+		id: newSessionID(), caller: c.ID, host: host, serial: serial, mode: mode,
 		conn: conn, created: time.Now(), lastUsed: time.Now(),
 		elevationPrefix: elevPrefix,
 		pty:             opts.PTY,
@@ -186,7 +186,7 @@ func (e *Engine) OpenSession(caller, host, mode string, ttlSeconds int, opts Exe
 		sh, err := sshrun.OpenShell(conn.Client, shellCmd)
 		if err != nil {
 			conn.Close()
-			e.auditE(audit.Entry{Caller: caller, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
+			e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
 			return nil, fmt.Errorf("abrir shell: %w", err)
 		}
 		s.shell = sh
@@ -201,7 +201,7 @@ func (e *Engine) OpenSession(caller, host, mode string, ttlSeconds int, opts Exe
 		sh, err := sshrun.OpenShellPTY(conn.Client, shellCmd, sshrun.ExecOptions{PTY: true})
 		if err != nil {
 			conn.Close()
-			e.auditE(audit.Entry{Caller: caller, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
+			e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
 			return nil, fmt.Errorf("abrir shell PTY: %w", err)
 		}
 		s.shell = sh
@@ -210,7 +210,7 @@ func (e *Engine) OpenSession(caller, host, mode string, ttlSeconds int, opts Exe
 
 	e.sessions.add(s)
 	e.auditE(audit.Entry{
-		Caller:    caller,
+		Caller:    c.ID,
 		Host:      host,
 		Serial:    serial,
 		SessionID: s.id,
@@ -224,7 +224,7 @@ func (e *Engine) OpenSession(caller, host, mode string, ttlSeconds int, opts Exe
 
 // SessionExec ejecuta command en una sesión existente, reutilizando la conexión.
 // En sesiones exec con elevación, antepone el prefijo autorizado por el signer.
-func (e *Engine) SessionExec(caller, sessionID, command string) (*Result, error) {
+func (e *Engine) SessionExec(c Caller, sessionID, command string) (*Result, error) {
 	s, ok := e.sessions.get(sessionID)
 	if !ok {
 		return nil, fmt.Errorf("sesión desconocida o expirada: %q", sessionID)
@@ -250,7 +250,7 @@ func (e *Engine) SessionExec(caller, sessionID, command string) (*Result, error)
 	}
 	if err != nil {
 		e.auditE(audit.Entry{
-			Caller: caller, Host: s.host, Serial: s.serial, SessionID: sessionID,
+			Caller: c.ID, Host: s.host, Serial: s.serial, SessionID: sessionID,
 			Command: command, Outcome: "error", Err: err.Error(),
 		})
 		return nil, fmt.Errorf("ejecución en sesión: %w", err)
@@ -263,7 +263,7 @@ func (e *Engine) SessionExec(caller, sessionID, command string) (*Result, error)
 	}
 
 	e.auditE(audit.Entry{
-		Caller:    caller,
+		Caller:    c.ID,
 		Host:      s.host,
 		Serial:    s.serial,
 		SessionID: sessionID,
@@ -277,13 +277,13 @@ func (e *Engine) SessionExec(caller, sessionID, command string) (*Result, error)
 }
 
 // CloseSession cierra y elimina una sesión.
-func (e *Engine) CloseSession(caller, sessionID string) error {
+func (e *Engine) CloseSession(c Caller, sessionID string) error {
 	s, ok := e.sessions.remove(sessionID)
 	if !ok {
 		return fmt.Errorf("sesión desconocida: %q", sessionID)
 	}
 	s.close()
-	e.auditE(audit.Entry{Caller: caller, Host: s.host, Serial: s.serial, SessionID: sessionID, Outcome: "session_close"})
+	e.auditE(audit.Entry{Caller: c.ID, Host: s.host, Serial: s.serial, SessionID: sessionID, Outcome: "session_close"})
 	return nil
 }
 

@@ -28,6 +28,12 @@ type WireRequest struct {
 
 	// PTY: solicita permit-pty en el certificado.
 	PTY bool `json:"pty,omitempty"`
+
+	// Identidad del usuario final, aseverada por el broker (autenticado por mTLS).
+	// EndUser alimenta la trazabilidad; EndUserGroups, si no es nil, activa el RBAC
+	// por usuario en el signer.
+	EndUser       string   `json:"end_user,omitempty"`
+	EndUserGroups []string `json:"end_user_groups,omitempty"`
 }
 
 // WireResponse es la respuesta del servicio a /v1/sign.
@@ -83,15 +89,17 @@ func NewRemote(url string, tlsCfg *tls.Config, timeout time.Duration) *Remote {
 // SignIntent implementa Signer contra el servicio remoto.
 func (r *Remote) SignIntent(in Intent) (*Issued, error) {
 	body, err := json.Marshal(WireRequest{
-		Host:       in.Host,
-		Role:       in.Role,
-		Purpose:    in.Purpose,
-		Command:    in.Command,
-		TTLSeconds: int(in.RequestedTTL / time.Second),
-		PublicKey:  string(ssh.MarshalAuthorizedKey(in.PublicKey)),
-		Sudo:       in.Sudo,
-		SudoUser:   in.SudoUser,
-		PTY:        in.PTY,
+		Host:          in.Host,
+		Role:          in.Role,
+		Purpose:       in.Purpose,
+		Command:       in.Command,
+		TTLSeconds:    int(in.RequestedTTL / time.Second),
+		PublicKey:     string(ssh.MarshalAuthorizedKey(in.PublicKey)),
+		Sudo:          in.Sudo,
+		SudoUser:      in.SudoUser,
+		PTY:           in.PTY,
+		EndUser:       in.EndUser,
+		EndUserGroups: in.EndUserGroups,
 	})
 	if err != nil {
 		return nil, err

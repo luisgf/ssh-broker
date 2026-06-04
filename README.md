@@ -5,13 +5,22 @@ recibe una credencial**: pide ejecutar un comando en un host y el broker firma u
 certificado SSH efímero y acotado, abre la conexión él mismo y devuelve **solo la
 salida del comando**.
 
-Dos frontends sobre el mismo motor (`internal/broker`):
+Tres frontends sobre el mismo motor (`internal/broker`) y la misma superficie de tools
+(`internal/mcpserver`):
 
-- **MCP (recomendado)** — `cmd/mcp-broker`, sobre stdio. Tools:
+- **MCP stdio (local, recomendado para uso personal)** — `cmd/mcp-broker`. Tools:
   - `ssh_execute(server, command [, sudo, sudo_user, pty])` — un disparo, cert con `force-command`.
   - `ssh_session_open(server, mode [, sudo, sudo_user])` / `ssh_session_exec(session_id, command)` /
     `ssh_session_close(session_id)` — sesión persistente (reuso de conexión).
   - `ssh_list_servers()`.
+  Sin autenticación de transporte: el aislamiento lo da que el proceso lo arranca el
+  propio usuario (modelo que recomienda la spec del MCP para stdio).
+- **MCP HTTP+OAuth2/OIDC (remoto, multiusuario)** — `cmd/mcp-broker-http`, Streamable HTTP.
+  Mismas tools, pero cada cliente se autentica con un **bearer token OIDC** que el broker
+  valida localmente contra el JWKS del issuer. La identidad del usuario (`sub`/
+  `preferred_username`) sustituye a `mcp-stdio` en la auditoría y, si el token porta grupos,
+  se propaga al signer para **RBAC por usuario**. Publica `/.well-known/oauth-protected-resource`
+  (RFC 9728) para el descubrimiento del cliente. Ver [Frontend MCP remoto](#frontend-mcp-remoto-oauth2oidc).
 - **HTTP+mTLS** — `cmd/broker`, `POST /v1/ssh_run` (un disparo), para agentes por red
   autenticados con certificado de cliente.
 
@@ -128,8 +137,11 @@ certificados correctamente (probado contra OpenSSH `sshd` en `lab/`).
 | `internal/ssh/run.go` | Dial multi-salto (`Dial`/`Conn`) + ejecución one-shot con/sin PTY |
 | `internal/ssh/shell.go` | Shell con estado: sin PTY (`OpenShell`) y con PTY (`OpenShellPTY`) |
 | `internal/audit/log.go` | Log firmado y encadenado (campos `elevation`, `pty`) |
-| `internal/auth/mtls.go` | mTLS del frontend HTTP; identidad del llamante |
+| `internal/auth/mtls.go` | mTLS del frontend HTTP + TLS solo-servidor para HTTP+OAuth; identidad del llamante |
+| `internal/mcpserver/*` | Registro compartido de tools (stdio y HTTP) parametrizado por la identidad del llamante |
+| `internal/oauth/verifier.go` | Validación de bearer tokens OIDC vía JWKS (go-oidc); extrae usuario y grupos |
 | `cmd/mcp-broker/main.go` | Servidor MCP (stdio): tools con Sudo/SudoUser/PTY |
+| `cmd/mcp-broker-http/main.go` | Servidor MCP remoto (Streamable HTTP + OAuth2/OIDC) con PRM (RFC 9728) |
 | `cmd/broker/main.go` | Frontend HTTP `POST /v1/ssh_run` (mTLS) con Sudo/SudoUser/PTY |
 | `deploy/sshd_config.snippet` | Config a aplicar en cada host gestionado (PTY + sudoers) |
 | `lab/run_mcp_lab.sh` | Laboratorio e2e del MCP |
@@ -154,6 +166,50 @@ En `~/.claude.json` (o `claude mcp add`):
 El modelo entonces dispone de `ssh_execute(server, command [, sudo, sudo_user, pty])` y `ssh_list_servers`.
 Ver `config.example.json` para el formato de hosts (el frontend HTTP usa los mismos
 campos más los de TLS).
+
+## Frontend MCP remoto (OAuth2/OIDC)
+
+Para exponer el broker por red a varios usuarios, `cmd/mcp-broker-http` sirve las mismas
+tools sobre **Streamable HTTP** y exige un **bearer token OIDC**. Encaja con la
+[spec de autorización del MCP](https://modelcontextprotocol.io/docs/tutorials/security/authorization),
+que reserva OAuth a los transportes HTTP (en stdio el aislamiento lo da el proceso, no OAuth).
+
+Flujo:
+
+1. El cliente MCP (VS Code, Claude Code, …) conecta; el broker responde `401` con
+   `WWW-Authenticate` apuntando a `/.well-known/oauth-protected-resource` (RFC 9728).
+2. El cliente descubre el Authorization Server (issuer) y hace **Authorization Code + PKCE**.
+3. El cliente reintenta con `Authorization: Bearer <token>`. El broker valida el JWT
+   **localmente** contra el JWKS del issuer (firma, `iss`, `aud`, `exp`) — sin round-trip
+   por petición ni client_secret.
+4. La identidad del token (`user_claim`, p. ej. `preferred_username`) se registra en la
+   auditoría. Si el token porta `groups_claim`, esos grupos se **propagan al signer**, que
+   exige que el host solicitado comparta alguno de los grupos del usuario (RBAC por usuario,
+   adicional al RBAC por CN mTLS del broker).
+
+Config (bloque `oauth` + `resource_url` en la config del broker, ver `config.example.json`):
+
+```json
+"listen": ":8443",
+"server_cert": "pki/broker.crt",
+"server_key": "pki/broker.key",
+"resource_url": "https://ssh-broker.example.com",
+"oauth": {
+  "issuer": "https://keycloak.example.com/realms/infra",
+  "audience": "https://ssh-broker.example.com",
+  "required_scopes": ["mcp:tools"],
+  "user_claim": "preferred_username",
+  "groups_claim": "groups"
+}
+```
+
+```bash
+go build -o ~/bin/mcp-broker-http ./cmd/mcp-broker-http
+~/bin/mcp-broker-http -config /ruta/segura/config.json
+```
+
+El RBAC por usuario solo se activa cuando el token trae grupos; las peticiones stdio y mTLS
+(sin grupos de usuario) siguen autorizándose como hasta ahora (compatibilidad).
 
 ## Recarga en caliente del signer
 

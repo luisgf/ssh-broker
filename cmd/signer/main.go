@@ -238,16 +238,18 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	in := signer.Intent{
-		Caller:       caller,
-		Host:         req.Host,
-		Role:         req.Role,
-		Purpose:      req.Purpose,
-		Command:      req.Command,
-		RequestedTTL: time.Duration(req.TTLSeconds) * time.Second,
-		PublicKey:    pub,
-		Sudo:         req.Sudo,
-		SudoUser:     req.SudoUser,
-		PTY:          req.PTY,
+		Caller:        caller,
+		Host:          req.Host,
+		Role:          req.Role,
+		Purpose:       req.Purpose,
+		Command:       req.Command,
+		RequestedTTL:  time.Duration(req.TTLSeconds) * time.Second,
+		PublicKey:     pub,
+		Sudo:          req.Sudo,
+		SudoUser:      req.SudoUser,
+		PTY:           req.PTY,
+		EndUser:       req.EndUser,
+		EndUserGroups: req.EndUserGroups,
 	}
 	issued, err := local.SignIntent(in)
 	if err != nil {
@@ -357,6 +359,9 @@ func (s *server) auditReload(caller string, hosts int, outcome string, err error
 
 func (s *server) auditEmission(caller string, req signer.WireRequest, hosts signer.PolicyTable, serial uint64, outcome string, err error) {
 	cmd := "role=" + req.Role + " purpose=" + req.Purpose
+	if req.EndUser != "" {
+		cmd += " user=" + req.EndUser
+	}
 	if req.Sudo {
 		u := req.SudoUser
 		if u == "" {

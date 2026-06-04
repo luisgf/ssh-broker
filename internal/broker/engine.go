@@ -61,6 +61,29 @@ type Config struct {
 	// Hosts: solo usado en modo local (single-binary). En modo remoto la lista
 	// de hosts se obtiene del signer vía /v1/hosts y se recarga periódicamente.
 	Hosts map[string]HostConfig `json:"hosts,omitempty"`
+
+	// OAuth y ResourceURL solo los usa el frontend HTTP+OAuth (cmd/mcp-broker-http);
+	// el resto de frontends los ignoran.
+	OAuth *OAuthConfig `json:"oauth,omitempty"`
+	// ResourceURL es la URL canónica de este servidor MCP, usada en el documento
+	// Protected Resource Metadata (RFC 9728) y en la cabecera WWW-Authenticate.
+	ResourceURL string `json:"resource_url,omitempty"`
+}
+
+// OAuthConfig configura la validación de tokens OIDC del frontend HTTP. El token
+// se valida localmente contra el JWKS del issuer (descubrimiento automático).
+type OAuthConfig struct {
+	// Issuer es la URL del proveedor OIDC (p. ej. https://keycloak.example/realms/x).
+	Issuer string `json:"issuer"`
+	// Audience es el valor esperado del claim aud (este resource server).
+	Audience string `json:"audience"`
+	// RequiredScopes son los scopes que el token debe portar para acceder.
+	RequiredScopes []string `json:"required_scopes,omitempty"`
+	// UserClaim es el claim usado como identidad del usuario (default "sub").
+	UserClaim string `json:"user_claim,omitempty"`
+	// GroupsClaim es el claim que porta los grupos/roles a propagar al signer.
+	// Vacío = no se propagan grupos (sin RBAC por usuario).
+	GroupsClaim string `json:"groups_claim,omitempty"`
 }
 
 // HostConfig describe un destino en modo local.
@@ -88,6 +111,15 @@ type SignerClientConfig struct {
 	ClientCert string `json:"client_cert"`
 	ClientKey  string `json:"client_key"`
 	CA         string `json:"ca"`
+}
+
+// Caller identifica el origen de una petición. ID es la identidad para auditoría
+// (sub/preferred_username de OIDC en el frontend HTTP, CN mTLS, o "mcp-stdio").
+// Groups son los grupos RBAC aseverados por el frontend (OIDC); vacío en stdio y
+// mTLS. Cuando Groups no está vacío, el signer aplica autorización por usuario.
+type Caller struct {
+	ID     string
+	Groups []string
 }
 
 // ExecOptions contiene las opciones de elevación y PTY para una ejecución.
@@ -350,23 +382,23 @@ func (e *Engine) Servers() []string {
 // Execute firma un cert efímero acotado (con force-command, y sudo si se pide),
 // ejecuta command en host de un disparo (a través de bastión si está configurado)
 // y audita.
-func (e *Engine) Execute(caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
+func (e *Engine) Execute(c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
 	if _, ok := e.hostInfo(host); !ok {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Command: command, Outcome: "denied", Err: "host desconocido"})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "denied", Err: "host desconocido"})
 		return nil, fmt.Errorf("host desconocido: %q", host)
 	}
 	if command == "" {
 		return nil, fmt.Errorf("command obligatorio")
 	}
 
-	hops, serial, err := e.buildHops(host, e.ttlFor(ttlSeconds), signer.PurposeOneshot, command, opts)
+	hops, serial, err := e.buildHops(c, host, e.ttlFor(ttlSeconds), signer.PurposeOneshot, command, opts)
 	if err != nil {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Command: command, Outcome: "error", Err: err.Error()})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "error", Err: err.Error()})
 		return nil, err
 	}
 	conn, err := sshrun.Dial(hops, 0)
 	if err != nil {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
 		return nil, fmt.Errorf("conexión: %w", err)
 	}
 	defer conn.Close()
@@ -374,11 +406,11 @@ func (e *Engine) Execute(caller, host, command string, ttlSeconds int, opts Exec
 	execOpts := sshrun.ExecOptions{PTY: opts.PTY}
 	res, err := sshrun.ExecOnce(conn.Client, command, execOpts)
 	if err != nil {
-		e.auditE(audit.Entry{Caller: caller, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
 		return nil, fmt.Errorf("ejecución: %w", err)
 	}
 	e.auditE(audit.Entry{
-		Caller:    caller,
+		Caller:    c.ID,
 		Host:      host,
 		Command:   command,
 		Serial:    serial,
@@ -400,7 +432,7 @@ func (e *Engine) ttlFor(ttlSeconds int) time.Duration {
 
 // buildHops resuelve la cadena destino→…→bastión y, por hop, genera un par efímero
 // y pide al firmante un cert para la intención.
-func (e *Engine) buildHops(host string, ttl time.Duration, purpose, command string, opts ExecOptions) ([]sshrun.Hop, uint64, error) {
+func (e *Engine) buildHops(c Caller, host string, ttl time.Duration, purpose, command string, opts ExecOptions) ([]sshrun.Hop, uint64, error) {
 	chain, err := e.resolveChain(host)
 	if err != nil {
 		return nil, 0, err
@@ -417,12 +449,14 @@ func (e *Engine) buildHops(host string, ttl time.Duration, purpose, command stri
 			return nil, 0, err
 		}
 		in := signer.Intent{
-			Caller:       localCaller,
-			Host:         name,
-			Role:         signer.RoleBastion,
-			Purpose:      purpose,
-			RequestedTTL: ttl,
-			PublicKey:    pub,
+			Caller:        localCaller,
+			Host:          name,
+			Role:          signer.RoleBastion,
+			Purpose:       purpose,
+			RequestedTTL:  ttl,
+			PublicKey:     pub,
+			EndUser:       c.ID,
+			EndUserGroups: c.Groups,
 		}
 		if isTarget {
 			in.Role = signer.RoleTarget
@@ -453,7 +487,7 @@ func (e *Engine) buildHops(host string, ttl time.Duration, purpose, command stri
 
 // buildHopsWithPrefix es igual que buildHops pero además devuelve el
 // ElevationPrefix emitido por el firmante para el hop target (sesiones).
-func (e *Engine) buildHopsWithPrefix(host string, ttl time.Duration, purpose string, opts ExecOptions) ([]sshrun.Hop, uint64, string, error) {
+func (e *Engine) buildHopsWithPrefix(c Caller, host string, ttl time.Duration, purpose string, opts ExecOptions) ([]sshrun.Hop, uint64, string, error) {
 	chain, err := e.resolveChain(host)
 	if err != nil {
 		return nil, 0, "", err
@@ -471,12 +505,14 @@ func (e *Engine) buildHopsWithPrefix(host string, ttl time.Duration, purpose str
 			return nil, 0, "", err
 		}
 		in := signer.Intent{
-			Caller:       localCaller,
-			Host:         name,
-			Role:         signer.RoleBastion,
-			Purpose:      purpose,
-			RequestedTTL: ttl,
-			PublicKey:    pub,
+			Caller:        localCaller,
+			Host:          name,
+			Role:          signer.RoleBastion,
+			Purpose:       purpose,
+			RequestedTTL:  ttl,
+			PublicKey:     pub,
+			EndUser:       c.ID,
+			EndUserGroups: c.Groups,
 		}
 		if isTarget {
 			in.Role = signer.RoleTarget

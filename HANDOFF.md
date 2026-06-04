@@ -1,6 +1,6 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
-> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-04 (capacidades en ssh_list_servers).
+> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-04 (v1.4.0 — frontend MCP HTTP+OAuth2/OIDC).
 
 ---
 
@@ -12,6 +12,8 @@ La solución es un **broker SSH** que actúa como intermediario: el modelo nunca
 
 El sistema opera en **modo remoto (producción)**: un servicio independiente (`cmd/signer`) custodia la clave CA y la política. El broker solo recibe el cert firmado. Un broker comprometido no puede robar la llave.
 
+A partir de v1.4.0 existe un **tercer frontend** (`cmd/mcp-broker-http`) que expone el broker por HTTP protegido con OAuth2/OIDC, para despliegues multiusuario por red. La identidad OIDC del usuario se propaga al signer para RBAC por usuario final.
+
 > El modo local (single-binary, `ca_key` en el broker) sigue soportado en código pero ya no es la configuración activa. Ver `config.example.json` y la sección `buildSigner` en `engine.go`.
 
 ---
@@ -21,50 +23,63 @@ El sistema opera en **modo remoto (producción)**: un servicio independiente (`c
 ```
 /home/luislgf/sources/ssh-broker/
 ├── cmd/
-│   ├── mcp-broker/main.go    # servidor MCP (stdio) — interfaz para el modelo
-│   │                         # tools: ssh_execute, ssh_session_open/exec/close,
-│   │                         # ssh_list_servers. Soporta sudo, sudo_user, pty.
-│   ├── signer/main.go        # servicio de firma externo (HTTPS+mTLS)
-│   │                         # endpoints: POST /v1/sign, GET /v1/hosts, POST /v1/reload
-│   │                         # reload en caliente (hosts/max_ttl/ca_key) + SIGHUP
-│   ├── broker-ctl/main.go    # CLI de gestión de signer.json
-│   │                         # host add/list/remove, reload (SIGHUP local o HTTP mTLS)
-│   │                         # preserva campos _comment al editar el JSON
-│   └── broker/main.go        # frontend HTTP+mTLS alternativo (one-shot)
+│   ├── mcp-broker/main.go        # servidor MCP (stdio) — interfaz local para el modelo
+│   │                             # tools: ssh_execute, ssh_session_open/exec/close,
+│   │                             # ssh_list_servers. Soporta sudo, sudo_user, pty.
+│   ├── mcp-broker-http/main.go   # servidor MCP remoto (Streamable HTTP + OAuth2/OIDC)
+│   │                             # mismas tools que stdio, con bearer token OIDC
+│   │                             # publica /.well-known/oauth-protected-resource (RFC 9728)
+│   ├── signer/main.go            # servicio de firma externo (HTTPS+mTLS)
+│   │                             # endpoints: POST /v1/sign, GET /v1/hosts, POST /v1/reload
+│   │                             # reload en caliente (hosts/max_ttl/ca_key) + SIGHUP
+│   │                             # /v1/sign: acepta end_user/end_user_groups para RBAC por usuario
+│   ├── broker-ctl/main.go        # CLI de gestión de signer.json
+│   │                             # host add/list/remove, reload (SIGHUP local o HTTP mTLS)
+│   │                             # preserva campos _comment al editar el JSON
+│   └── broker/main.go            # frontend HTTP+mTLS alternativo (one-shot)
 ├── internal/
 │   ├── ca/
-│   │   ├── sign.go           # GenerateEphemeralKey + BuildAndSign(Constraints)
-│   │   │                     # Constraints: AllowPTY → permit-pty en el cert
+│   │   ├── sign.go               # GenerateEphemeralKey + BuildAndSign(Constraints)
+│   │   │                         # Constraints: AllowPTY → permit-pty en el cert
 │   │   └── sign_test.go
 │   ├── signer/
-│   │   ├── signer.go         # Signer interface, Local, PolicyTable.Resolve
-│   │   │                     # Intent: Sudo/SudoUser/PTY
-│   │   │                     # HostPolicy: allow_sudo/allowed_sudo_users/allow_pty/groups
-│   │   │                     # CallerPolicy/CallerTable: RBAC por grupos (CN→allowed_groups)
-│   │   │                     # HostSetForCaller: calcula hosts accesibles por CN
-│   │   │                     # Issued: ElevationPrefix (sesiones)
-│   │   │                     # Resolve → (Constraints, elevationPrefix, error)
-│   │   │                     # helpers: buildElevatedCommand, shellQuote, validación
-│   │   ├── remote.go         # Remote: SignIntent + FetchHosts + WireHostInfo
-│   │   │                     # WireRequest: sudo/sudo_user/pty
-│   │   │                     # WireResponse: elevation_prefix
-│   │   └── signer_test.go    # tests: TTL, authz, sudo, PTY, inyección, shellQuote,
-│   │                         #        HostSetForCaller (grupos/denegación/múltiples/etc.)
+│   │   ├── signer.go             # Signer interface, Local, PolicyTable.Resolve
+│   │   │                         # Intent: Sudo/SudoUser/PTY + EndUser/EndUserGroups
+│   │   │                         # HostPolicy: allow_sudo/allowed_sudo_users/allow_pty/groups
+│   │   │                         # CallerPolicy/CallerTable: RBAC por grupos (CN→allowed_groups)
+│   │   │                         # RBAC por usuario: EndUserGroups ∩ hp.Groups (si no-nil)
+│   │   │                         # HostSetForCaller, groupsIntersect
+│   │   │                         # Resolve → (Constraints, elevationPrefix, error)
+│   │   ├── remote.go             # Remote: SignIntent + FetchHosts + WireHostInfo
+│   │   │                         # WireRequest: sudo/sudo_user/pty/end_user/end_user_groups
+│   │   │                         # WireResponse: elevation_prefix
+│   │   ├── signer_test.go        # tests: TTL, authz, sudo, PTY, inyección, shellQuote,
+│   │   │                         #        HostSetForCaller (grupos/denegación/múltiples/etc.)
+│   │   └── rbac_user_test.go     # tests RBAC por usuario final (EndUserGroups)
 │   ├── broker/
-│   │   ├── engine.go         # Engine: ExecOptions{Sudo,SudoUser,PTY},
-│   │   │                     # Execute, buildHops, buildHopsWithPrefix,
-│   │   │                     # policyFromHosts (mapea allow_sudo/allow_pty)
-│   │   ├── engine_test.go    # tests de resolveChain (ciclos, cadenas)
-│   │   └── session.go        # sessionManager, OpenSession (mode=exec|shell|pty),
-│   │                         # liveSession.elevationPrefix/.pty, SessionExec
+│   │   ├── engine.go             # Engine: Caller{ID,Groups}, ExecOptions{Sudo,SudoUser,PTY},
+│   │   │                         # Execute, buildHops, buildHopsWithPrefix,
+│   │   │                         # OAuthConfig, Config.OAuth/ResourceURL
+│   │   ├── engine_test.go        # tests de resolveChain (ciclos, cadenas)
+│   │   └── session.go            # sessionManager, OpenSession, SessionExec, CloseSession
+│   │                             # (firmas actualizadas a Caller)
+│   ├── mcpserver/
+│   │   ├── server.go             # New(eng, callerFn) — construye *mcp.Server
+│   │   └── tools.go              # Register: 5 tools compartidas por stdio y HTTP
+│   │                             # CallerFunc(ctx) → broker.Caller
+│   ├── oauth/
+│   │   ├── verifier.go           # Verifier: NewVerifier (go-oidc, descubrimiento JWKS)
+│   │   │                         # Verify → auth.TokenInfo (UserID, Scopes, groups)
+│   │   └── verifier_test.go      # tests con IdP OIDC falso (httptest + go-jose RSA)
 │   ├── ssh/
-│   │   ├── run.go            # Hop, Conn, Dial(hops), ExecOnce(opts...), Run
-│   │   │                     # ExecOptions{PTY, Term, Rows, Cols}
-│   │   └── shell.go          # OpenShell(client, shellCmd) — sin PTY, parametrizable
-│   │                         # OpenShellPTY(client, shellCmd, opts) — con PTY
-│   ├── audit/log.go          # Entry: Elevation string + PTY bool (omitempty)
-│   │                         # log append-only firmado y encadenado (Ed25519)
-│   └── auth/mtls.go          # ServerTLSConfig, ClientTLSConfig, CallerCN
+│   │   ├── run.go                # Hop, Conn, Dial(hops), ExecOnce(opts...), Run
+│   │   │                         # ExecOptions{PTY, Term, Rows, Cols}
+│   │   └── shell.go              # OpenShell(client, shellCmd) — sin PTY, parametrizable
+│   │                             # OpenShellPTY(client, shellCmd, opts) — con PTY
+│   ├── audit/log.go              # Entry: Elevation string + PTY bool (omitempty)
+│   │                             # log append-only firmado y encadenado (Ed25519)
+│   └── auth/mtls.go              # ServerTLSConfig, ClientTLSConfig, CallerCN
+│                                 # ServerTLSConfigNoClientAuth (para frontend HTTP+OAuth)
 ├── lab/
 │   ├── run_lab.sh            # lab e2e frontend HTTP+mTLS (modo local)
 │   ├── run_mcp_lab.sh        # lab e2e MCP con ProxyJump (bastión + destino)
@@ -141,7 +156,7 @@ broker-ctl --config /ruta/signer.json host list
 \* Se requiere `--host-key` o `--scan`, pero no ambos.
 ```
 
-**Binarios compilados:** `~/bin/mcp-broker` · `~/bin/signer` · `~/bin/broker-ctl`
+**Binarios compilados:** `~/bin/mcp-broker` · `~/bin/mcp-broker-http` · `~/bin/signer` · `~/bin/broker-ctl`
 
 **Estado de compilación y tests:** `go build ./...` ✅ · `go vet ./...` ✅ · `go test ./...` ✅
 
@@ -153,10 +168,29 @@ broker-ctl --config /ruta/signer.json host list
 
 ```
 Modelo de IA (Claude / OpenCode)
+    │                           │
+    │  stdio MCP (local)        │  HTTP+Bearer MCP (red)
+    │                           │  Authorization: Bearer <token OIDC>
+    ▼                           ▼
+cmd/mcp-broker                cmd/mcp-broker-http        ← nunca tienen clave CA
+~/bin/mcp-broker              ~/bin/mcp-broker-http
+    │  mismas 5 tools          │  valida JWT vía JWKS (go-oidc)
+    │  caller="mcp-stdio"      │  caller={sub, groups del token}
+    │                           │  propaga EndUser+EndUserGroups al signer
+    └─────────────┬─────────────┘
+                  │
+    │  al arrancar: GET /v1/hosts → cache
+    │  cada 30s:    GET /v1/hosts → recarga   ← hosts_refresh_seconds (configurable)
     │
-    │  stdio MCP
+    │  genera par Ed25519 efímero              ← priv se queda aquí
+    │  envía Intent{host, role,
+    │    purpose, command, pubkey,
+    │    sudo?, sudo_user?, pty?,
+    │    end_user?, end_user_groups?}
+    │
+    │  HTTPS + mTLS  (pki/broker.crt, CN=broker-1)
     ▼
-cmd/mcp-broker  ~/bin/mcp-broker              ← nunca tiene clave CA
+cmd/signer  ~/bin/signer                      ← única custodia de la clave CA
     │  al arrancar: GET /v1/hosts → cache
     │  cada 30s:    GET /v1/hosts → recarga   ← hosts_refresh_seconds (configurable)
     │
@@ -406,7 +440,25 @@ La autorización de `sudo` vive en el signer (`allow_sudo`, `allowed_sudo_users`
 - Whitelist `allowed_sudo_users` (vacía = solo root).
 - El comando se envuelve siempre como `prefix -- /bin/sh -c <shellQuote(cmd)>` para evitar inyección.
 
-### 10. RBAC por grupos: visibilidad y firma filtradas por CN
+### 10. Frontend HTTP+OAuth2/OIDC (v1.4.0)
+
+La spec del MCP indica explícitamente que OAuth aplica solo a **transportes HTTP remotos**, no a stdio. `cmd/mcp-broker-http` implementa el flujo completo (RFC 9728 + OAuth 2.1):
+
+1. Sin token → `401 WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"`.
+2. El cliente descubre el Authorization Server, hace Authorization Code + PKCE y reintenta con bearer token.
+3. El broker valida el JWT **localmente** contra el JWKS del issuer (`go-oidc`, con cache/rotación). Sin round-trip por petición; sin client_secret.
+4. `TokenInfo.UserID` (`sub` o `preferred_username`) → `Caller.ID` → `audit.Entry.Caller`.
+5. Si el token porta un `groups_claim`, los grupos van en `Caller.Groups` → `Intent.EndUserGroups` → RBAC por usuario en `PolicyTable.Resolve`.
+
+Las tools y la lógica son idénticas a stdio: compartidas por `internal/mcpserver.Register`. La única diferencia entre frontends es `CallerFunc(ctx) → broker.Caller`.
+
+### 11. RBAC por usuario final (EndUser/EndUserGroups)
+
+Añadido en v1.4.0 al signer. Cuando `Intent.EndUserGroups` no es nil (petición desde frontend HTTP+OIDC), `Resolve` exige que `hp.Groups ∩ EndUserGroups ≠ ∅`. Si es nil (stdio/mTLS), el filtro no se aplica — compatibilidad total.
+
+El `EndUser` también aparece en el `KeyID` del cert para trazabilidad en `sshd`. El RBAC se aplica a todos los hops (bastión + destino).
+
+### 12. RBAC por grupos: visibilidad y firma filtradas por CN
 
 Cada host declara los grupos a los que pertenece (`"groups": [...]` en su política). La sección `callers` del signer mapea el CN del cert mTLS de cada broker a los grupos que puede usar (`"allowed_groups": [...]`).
 
@@ -464,7 +516,7 @@ El broker (`engine.go`) tiene su propio mecanismo (`auditE()`) que rellena `user
 - [ ] **KRL (Key Revocation List)**: añadir `RevokedKeys /etc/ssh/krl` en sshd y un endpoint `/v1/revoke` en el signer que genere la KRL por serial.
 - [ ] **Logs a almacenamiento WORM**: enviar el log de auditoría (ya firmado y encadenado) a S3, GCS, Loki o SIEM en tiempo real.
 - [ ] **Sesiones multi-instancia**: hoy el `sessionManager` es in-process. Con varias réplicas del broker hay que externalizar el estado a Redis con TTL.
-- [ ] **Autenticación del modelo ante el broker**: en el modo MCP+stdio el aislamiento lo da el proceso. Para entornos multi-tenant añadir un token de sesión.
+- [x] **Autenticación del modelo ante el broker (HTTP)**: `cmd/mcp-broker-http` (v1.4.0) valida bearer token OIDC. Para stdio el aislamiento sigue siendo el proceso.
 - [ ] **Lab e2e para sudo + PTY**: extender `lab/run_mcp_lab.sh` con un escenario que levante un `sshd` con `sudoers NOPASSWD` y verifique one-shot elevado, sesión `shell` elevada y sesión `pty`.
 
 ### Baja prioridad
@@ -553,4 +605,5 @@ git tag v1.1.0
 5. La **separación física broker/signer** (máquinas distintas) requeriría: nuevo SAN en el cert del signer con la IP/hostname real, y actualizar `config.json` del broker con esa URL.
 6. Para usar **elevación en un host real**: añadir `allow_sudo: true` en `signer.json` para ese host, recargar el signer (`kill -HUP` o `/v1/reload`), y configurar `sudoers NOPASSWD` en el host remoto. Verificar con `ssh_execute(server, "id", sudo=true)`.
 7. Para usar **PTY**: añadir `allow_pty: true` en `signer.json` para ese host, recargar el signer (`kill -HUP` o `/v1/reload`). Usar `ssh_execute(..., pty=true)` para one-shot o `ssh_session_open(server, mode="pty")` para sesión interactiva.
-8. Para usar **RBAC por grupos**: añadir `"groups": ["nombre-grupo"]` en cada host de `signer.json`, y una sección `"callers": { "CN-del-broker": { "allowed_groups": ["nombre-grupo"] } }`. Recargar con `kill -HUP "$(cat signer.pid)"`. Un CN ausente de `callers` no tiene restricción (backward compatible). Para un nuevo broker restringido: emitir un cert con nuevo CN firmado por `pki/mtls_ca.crt` y añadirlo a `callers`. Si un host tiene `"jump": "bastion"`, incluir el bastión en los mismos grupos.
+8. Para usar **RBAC por grupos (broker mTLS)**: añadir `"groups": ["nombre-grupo"]` en cada host de `signer.json`, y una sección `"callers": { "CN-del-broker": { "allowed_groups": ["nombre-grupo"] } }`. Recargar con `kill -HUP "$(cat signer.pid)"`. Un CN ausente de `callers` no tiene restricción (backward compatible). Para un nuevo broker restringido: emitir un cert con nuevo CN firmado por `pki/mtls_ca.crt` y añadirlo a `callers`. Si un host tiene `"jump": "bastion"`, incluir el bastión en los mismos grupos.
+9. Para usar **frontend HTTP+OAuth** (`cmd/mcp-broker-http`): configurar el bloque `oauth` y `resource_url` en `config.json` (ver `config.example.json`). Compilar con `go build -o ~/bin/mcp-broker-http ./cmd/mcp-broker-http`. Proveer certificado TLS (`server_cert`/`server_key`) — no hace falta `client_ca` porque la autenticación la aporta el bearer token. Para RBAC por usuario añadir `"groups_claim": "groups"` en el bloque `oauth` y añadir el campo `groups` a los hosts en `signer.json` correspondientes.

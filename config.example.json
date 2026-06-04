@@ -21,6 +21,16 @@
   "server_key": "pki/broker.key",
   "client_ca": "pki/agents_ca.crt",
 
+  "_oauth_comment": "Solo lo usa el frontend MCP remoto cmd/mcp-broker-http. Valida el bearer token OIDC localmente contra el JWKS del issuer (descubrimiento automático). resource_url es la URL canónica de este servidor MCP (va en el Protected Resource Metadata y en WWW-Authenticate). groups_claim (opcional) propaga los grupos del usuario al signer para RBAC por usuario. Con OAuth, listen sirve HTTPS solo-servidor (sin mTLS); client_ca se ignora.",
+  "_resource_url_example": "https://ssh-broker.example.com",
+  "_oauth_example": {
+    "issuer": "https://keycloak.example.com/realms/infra",
+    "audience": "https://ssh-broker.example.com",
+    "required_scopes": ["mcp:tools"],
+    "user_claim": "preferred_username",
+    "groups_claim": "groups"
+  },
+
   "hosts": {
     "bastion": {
       "addr": "bastion.example.com:22",

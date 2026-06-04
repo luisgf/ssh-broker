@@ -35,6 +35,21 @@ func ServerTLSConfig(serverCertFile, serverKeyFile, clientCAFile string) (*tls.C
 	}, nil
 }
 
+// ServerTLSConfigNoClientAuth devuelve un *tls.Config para un servidor HTTPS que
+// presenta (serverCertFile, serverKeyFile) pero NO exige certificado de cliente.
+// Lo usa el frontend MCP sobre HTTP+OAuth: la autenticación del llamante la aporta
+// el bearer token (OIDC), no mTLS.
+func ServerTLSConfigNoClientAuth(serverCertFile, serverKeyFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(serverCertFile, serverKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("cargar cert de servidor: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
+
 // ClientTLSConfig construye la config TLS de un cliente mTLS: presenta
 // (certFile, keyFile) y verifica al servidor contra serverCAFile. La usa el
 // broker para hablar con el servicio de firma.
