@@ -573,16 +573,31 @@ El broker (`engine.go`) tiene su propio mecanismo (`auditE()`) que rellena `user
 - Versión inicial: **v1.0.0**
 - Los tags `vX.Y.Z` se crean **solo en `main`** (no en ramas de desarrollo).
 
+### Paso obligatorio antes de cada commit
+
+**Antes de cualquier commit que modifique código, configuración o comportamiento**, actualizar:
+
+1. **`CHANGELOG.md`** — añadir una entrada al principio con el formato:
+   ```markdown
+   ## [vX.Y.Z] - YYYY-MM-DD
+   ### Added / Changed / Fixed / Security / Removed
+   - …
+   ```
+2. **`README.md`** — reflejar cualquier cambio en la interfaz pública, configuración, opciones nuevas, secciones de seguridad o estado de pendientes.
+
+Estos dos archivos son la **documentación viva del proyecto**: un commit sin ellos asume que nada visible cambió (solo refactors internos sin efecto externo). Si el cambio es puramente interno (renombrado de variable, refactoring sin impacto en interfaz), puede omitirse con justificación explícita en el mensaje del commit.
+
 ### Procedimiento: commit en `main` (docs, config, hotfix)
 
 ```bash
 # 1. Ver la versión actual
 git describe --tags --abbrev=0        # ej. v1.0.3
 
-# 2. Comitear
+# 2. Actualizar CHANGELOG.md y README.md (obligatorio — ver arriba)
+# 3. Comitear
 git commit -m "descripción del cambio"
 
-# 3. Etiquetar con Z+1
+# 4. Etiquetar con Z+1
 git tag v1.0.4
 ```
 
@@ -592,8 +607,8 @@ git tag v1.0.4
 # En main, tras el merge (Y+1, Z=0):
 git merge feature/mi-funcionalidad
 
-# Actualizar CHANGELOG.md con la nueva entrada vX.(Y+1).0
-git add CHANGELOG.md
+# Actualizar CHANGELOG.md y README.md (obligatorio — ver arriba)
+git add CHANGELOG.md README.md
 git commit -m "chore: merge feature/mi-funcionalidad → v1.1.0"
 git tag v1.1.0
 ```

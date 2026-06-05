@@ -199,7 +199,8 @@ Config (bloque `oauth` + `resource_url` en la config del broker, ver `config.exa
   "audience": "https://ssh-broker.example.com",
   "required_scopes": ["mcp:tools"],
   "user_claim": "preferred_username",
-  "groups_claim": "groups"
+  "groups_claim": "groups",
+  "max_token_age_seconds": 3600
 }
 ```
 
@@ -236,7 +237,26 @@ curl --cert broker-admin.crt --key broker-admin.key --cacert signer_ca.crt \
 kill -HUP "$(cat signer.pid)"
 ```
 
-## Probar
+## Seguridad (v1.4.1)
+
+Doce controles de hardening añadidos en v1.4.1 (revisión MCP/Snyk):
+
+| Control | Archivo(s) | Detalle |
+|---|---|---|
+| Verificación de propietario de sesión (C1) | `internal/broker/session.go` | `SessionExec`/`CloseSession` verifican que el caller sea el propietario de la sesión antes de operar. |
+| Timeouts HTTP (A1) | `cmd/signer/main.go`, `cmd/mcp-broker-http/main.go` | `ReadTimeout`, `WriteTimeout` (solo signer), `IdleTimeout` en `http.Server`. |
+| Límite de payload (A2) | `cmd/signer/main.go`, `internal/signer/remote.go` | `MaxBytesReader(64 KiB)` en `/v1/sign`; `LimitReader(1 MiB)` en las respuestas de `remote.go`. |
+| Timeout de ejecución SSH + límite de salida (A3) | `internal/ssh/run.go`, `internal/ssh/shell.go` | Timeout por defecto 10 min; salida limitada a 10 MiB; `SIGTERM` en timeout. |
+| Restauración de cadena de auditoría (A4) | `internal/audit/log.go` | Al reiniciar, `restoreChain()` recupera `seq`+`prevHash` del último registro vía `bufio.Scanner`. |
+| Errores de auditoría visibles (M1) | `internal/broker/engine.go`, `cmd/signer/main.go` | `auditLog.Append` ya no silencia errores con `_ =`; se registran con `log.Printf`. |
+| Límite de sesiones activas (M2) | `internal/broker/session.go` | `maxSessionsGlobal=200`, `maxSessionsPerCaller=20`. |
+| Validación de antigüedad del JWT (M3) | `internal/oauth/verifier.go` | `OAuthConfig.MaxTokenAgeSeconds` valida el claim `iat`; recomendado 3600 s en producción. |
+| Rechazo de newlines en comandos (M5) | `internal/broker/session.go` | `SessionExec` rechaza comandos con `\n`/`\r`. |
+| Aviso en carga de CA desde PEM (L1) | `internal/ca/sign.go` | `LoadCAFromPEM` emite `[WARN]` en runtime. |
+| Rotación del log de auditoría (L2) | `internal/audit/log.go` | `maybeRotate()` rota el fichero al superar 100 MiB. |
+| Pre-validación de inputs MCP (L4) | `internal/mcpserver/tools.go` | `validateInput()` limita campos a 64 KiB y rechaza bytes nulos antes de llegar al engine. |
+
+
 
 ```bash
 bash lab/run_signer_lab.sh # servicio de firma externo: broker SIN ca_key + política + denegación
@@ -255,4 +275,3 @@ go test ./...              # cert build, política del firmante (autz/TTL/sudo/P
 - Rotación/segregación de la clave de auditoría; envío del log a almacenamiento
   WORM o servicio externo.
 - Escenario de lab e2e para sudo + PTY (`lab/run_mcp_lab.sh`).
-

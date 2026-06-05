@@ -1,6 +1,35 @@
 # Changelog
 
-## [v1.3.0] - 2026-06-04
+## [v1.4.1] - 2026-06-05
+
+### Security
+- **C1 (crítica)** `internal/broker/session.go`: `SessionExec` y `CloseSession` verifican que el caller sea el propietario de la sesión antes de operar; `CloseSession` hace get-antes-de-delete para no borrar sesiones ajenas.
+- **A1 (alta)** `cmd/signer/main.go`, `cmd/mcp-broker-http/main.go`: `ReadTimeout`, `WriteTimeout` (solo signer), `IdleTimeout` en `http.Server`.
+- **A2 (alta)** `cmd/signer/main.go`, `internal/signer/remote.go`: `http.MaxBytesReader(64 KiB)` en `/v1/sign`; `io.LimitReader(1 MiB)` en ambos `io.ReadAll` de `remote.go`.
+- **A3 (alta)** `internal/ssh/run.go`, `internal/ssh/shell.go`: `defaultExecTimeout=10 min`; `maxOutputBytes=10 MiB`; `limitedWriter`; `session.Signal(SIGTERM)` en timeout; shell/pty descarta bytes excedentes.
+- **A4 (alta)** `internal/audit/log.go`: `restoreChain()` con `bufio.Scanner` (buffer 256 KiB) restaura `seq`+`prevHash` del último registro al reiniciar; sin esta corrección el broker rompía la cadena de auditoría en cada reinicio.
+- **M1 (media)** `internal/broker/engine.go`, `cmd/signer/main.go`: errores de `auditLog.Append` ya no silenciados con `_ =`; se registran con `log.Printf`.
+- **M2 (media)** `internal/broker/session.go`: `maxSessionsGlobal=200`, `maxSessionsPerCaller=20`; `sessionManager.add()` retorna `error`.
+- **M3 (media)** `internal/oauth/verifier.go`, `internal/broker/engine.go`, `cmd/mcp-broker-http/main.go`: campo `MaxTokenAge` en `Config`/`Verifier`; valida el claim `iat` si `maxTokenAge > 0`; `OAuthConfig.MaxTokenAgeSeconds` (recomendado: 3600).
+- **M5 (media)** `internal/broker/session.go`: `SessionExec` rechaza comandos con `\n` o `\r`.
+- **L1 (baja)** `internal/ca/sign.go`: `LoadCAFromPEM` emite `[WARN]` en runtime indicando que solo es apto para laboratorio.
+- **L2 (baja)** `internal/audit/log.go`: `maybeRotate()` rota el fichero de auditoría al superar 100 MiB, renombrando a `<path>.20060102T150405Z`.
+- **L4 (baja)** `internal/mcpserver/tools.go`: `validateInput()` limita todos los campos de entrada a 64 KiB y rechaza bytes nulos; se invoca en los 4 tool handlers antes de llegar al engine.
+
+## [v1.4.0] - 2026-06-04
+
+### Added
+- Frontend MCP remoto `cmd/mcp-broker-http`: Streamable HTTP + OAuth2/OIDC (RFC 9728 + Authorization Code + PKCE)
+- Validación de bearer tokens OIDC **localmente** contra el JWKS del issuer (`go-oidc`): sin round-trip por petición, sin `client_secret`
+- Identidad OIDC (`user_claim`, p. ej. `preferred_username`) como `Caller.ID` en la auditoría del broker
+- RBAC por usuario final: si el token porta `groups_claim`, los grupos se propagan al signer como `EndUserGroups`; el signer exige `hp.Groups ∩ EndUserGroups ≠ ∅` (adicional al RBAC por CN mTLS)
+- `/.well-known/oauth-protected-resource` (RFC 9728) para descubrimiento del Authorization Server por el cliente MCP
+- `internal/mcpserver`: tools extraídas a paquete compartido; ambos frontends (stdio y HTTP) usan exactamente el mismo `Register(eng, callerFn)`
+- `internal/oauth/verifier.go`: `NewVerifier` + `Verify` con extracción de `UserID`, `Scopes` y grupos; tests con IdP OIDC falso (`httptest` + `go-jose` RSA)
+- `internal/auth/mtls.go`: `ServerTLSConfigNoClientAuth` para el frontend HTTP+OAuth (TLS sin mTLS)
+- `OAuthConfig` y `ResourceURL` en `broker.Config`; `CallerFunc` inyectable en `mcpserver.New`
+
+
 
 ### Changed
 - Descripciones de tools MCP mejoradas para reducir errores del modelo:
