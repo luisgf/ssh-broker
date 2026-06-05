@@ -1,5 +1,15 @@
 # Changelog
 
+## [v1.4.4] - 2026-06-05
+
+### Added
+- `API.md`: new dedicated API reference document (English) covering all HTTP endpoints across all three services — signer (`POST /v1/sign`, `GET /v1/hosts`, `POST /v1/reload`), broker HTTP (`POST /v1/ssh_run`), and MCP HTTP (`GET /.well-known/oauth-protected-resource` + Streamable HTTP tools). Each endpoint documents auth requirements, request/response schemas, error codes, and audit outcomes. Includes audit log field reference, outcome value table, `jq` correlation examples, and Ed25519 chain integrity description.
+- `README.md`: `## API Reference` section replaced with a summary table + link to `API.md`.
+- `HANDOFF.md`: added mandatory `API.md` update rule (step 3 in "Paso obligatorio antes de cada commit") and English language rule for all new commit messages, documentation files, and code comments.
+
+### Changed
+- `README.md`: full rewrite in English. All sections translated; broken `## Por qué un MCP propio` heading fixed; content reorganized to match current feature set (v1.4.3).
+
 ## [v1.4.3] - 2026-06-05
 
 ### Added

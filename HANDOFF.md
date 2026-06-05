@@ -584,8 +584,11 @@ El broker (`engine.go`) tiene su propio mecanismo (`auditE()`) que rellena `user
    - …
    ```
 2. **`README.md`** — reflejar cualquier cambio en la interfaz pública, configuración, opciones nuevas, secciones de seguridad o estado de pendientes.
+3. **`API.md`** — si se añadió, eliminó, renombró o cambió el esquema de request/response de algún endpoint HTTP, actualizar `API.md` para reflejar el cambio. Aplica a todos los servicios: signer (`/v1/sign`, `/v1/hosts`, `/v1/reload`), broker HTTP (`/v1/ssh_run`) y MCP HTTP (incluyendo firmas de tools MCP).
 
-Estos dos archivos son la **documentación viva del proyecto**: un commit sin ellos asume que nada visible cambió (solo refactors internos sin efecto externo). Si el cambio es puramente interno (renombrado de variable, refactoring sin impacto en interfaz), puede omitirse con justificación explícita en el mensaje del commit.
+Estos archivos son la **documentación viva del proyecto**: un commit sin ellos asume que nada visible cambió (solo refactors internos sin efecto externo). Si el cambio es puramente interno (renombrado de variable, refactoring sin impacto en interfaz), puede omitirse con justificación explícita en el mensaje del commit.
+
+**Language:** all commit messages, new documentation files (`README.md`, `API.md`, guides, etc.) and comments in new code must be written in **English**. Existing internal files (`HANDOFF.md`, `CHANGELOG.md`, comments in existing Go code) may remain in Spanish.
 
 ### Procedimiento: commit en `main` (docs, config, hotfix)
 
