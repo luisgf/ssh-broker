@@ -130,6 +130,35 @@ broker-ctl reload
 
 # Usar config alternativa
 broker-ctl --config /ruta/signer.json host list
+
+# ── Auditoría ────────────────────────────────────────────────────────────────
+
+# Seguir el log del broker en tiempo real (muestra las últimas 20 líneas primero)
+broker-ctl audit tail --log audit.log
+broker-ctl audit tail --log audit.log -n 50
+
+# Seguir el log del signer (emisiones de certificados)
+broker-ctl audit tail --log signer_audit.log
+
+# Filtrar entradas (host, caller, outcome, fecha; combinables)
+broker-ctl audit show --log audit.log --host web01
+broker-ctl audit show --log audit.log --outcome denied
+broker-ctl audit show --log signer_audit.log --outcome issued --since 2026-06-05
+broker-ctl audit show --log audit.log --host db01 --outcome denied --limit 20
+
+# Salida JSON para pipelines jq
+broker-ctl audit show --log audit.log --outcome denied --json | jq .
+broker-ctl audit show --log audit.log --json | jq 'select(.serial==1042)'
+broker-ctl audit show --log audit.log --json \
+  | jq 'select(.elevation != null and .elevation != "")'
+
+# Verificar integridad de la cadena de hash
+broker-ctl audit verify --log audit.log
+broker-ctl audit verify --log signer_audit.log
+
+# Verificar cadena + firmas Ed25519
+broker-ctl audit verify --log audit.log        --key pki/audit.seed
+broker-ctl audit verify --log signer_audit.log --key pki/signer_audit.seed
 ```
 
 **Flags completos de `host add`:**

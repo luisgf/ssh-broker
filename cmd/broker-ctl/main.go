@@ -1,21 +1,31 @@
-// broker-ctl gestiona la configuración del signer (signer.json) y fuerza recargas.
+// broker-ctl gestiona la configuración del signer (signer.json), fuerza recargas
+// y permite revisar los logs de auditoría.
 //
 // Uso:
 //
 //	broker-ctl host add    [flags]          # Añade o actualiza un host
 //	broker-ctl host list   [--config f]     # Lista hosts configurados
 //	broker-ctl host remove [--config f] <nombre>
-//	broker-ctl reload      [flags]          # Recarga signer (SIGHUP local o HTTP)
+//	broker-ctl reload      [--config f] [flags]           # Recarga signer
+//	broker-ctl audit tail   --log <f> [-n N]              # Sigue el log en tiempo real
+//	broker-ctl audit show   --log <f> [filtros] [--json]  # Busca/filtra entradas
+//	broker-ctl audit verify --log <f> [--key seed]        # Verifica integridad de cadena
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -39,6 +49,8 @@ func main() {
 		cmdHost(os.Args[2:])
 	case "reload":
 		cmdReload(os.Args[2:])
+	case "audit":
+		cmdAudit(os.Args[2:])
 	case "help", "--help", "-h":
 		usageTop()
 	default:
@@ -52,10 +64,13 @@ func usageTop() {
 	fmt.Fprintln(os.Stderr, `broker-ctl — gestión de configuración del SSH broker
 
 Uso:
-  broker-ctl host add    [--config f] [flags]     Añade o actualiza un host
-  broker-ctl host list   [--config f]             Lista hosts configurados
-  broker-ctl host remove [--config f] <nombre>    Elimina un host
-  broker-ctl reload      [--config f] [flags]     Recarga el signer
+  broker-ctl host add    [--config f] [flags]      Añade o actualiza un host
+  broker-ctl host list   [--config f]              Lista hosts configurados
+  broker-ctl host remove [--config f] <nombre>     Elimina un host
+  broker-ctl reload      [--config f] [flags]      Recarga el signer
+  broker-ctl audit tail   --log <f> [-n N]         Sigue el log de auditoría en tiempo real
+  broker-ctl audit show   --log <f> [filtros]      Busca y filtra entradas del log
+  broker-ctl audit verify --log <f> [--key seed]   Verifica la integridad de la cadena
 
 Opciones globales:
   --config   Ruta a signer.json (default: ./signer.json)`)
@@ -508,4 +523,412 @@ func must(err error) {
 	if err != nil {
 		fatalf("%v", err)
 	}
+}
+
+// ── audit ─────────────────────────────────────────────────────────────────────
+
+// auditEntry mirrors internal/audit.Entry without importing that package.
+// Field order must be identical for Ed25519 signature verification: json.Marshal
+// produces fields in struct-definition order, so any divergence breaks --key.
+type auditEntry struct {
+	Time      time.Time `json:"time"`
+	Caller    string    `json:"caller"`
+	Host      string    `json:"host"`
+	User      string    `json:"user"`
+	Principal string    `json:"principal"`
+	Command   string    `json:"command"`
+	TTL       string    `json:"ttl"`
+	Serial    uint64    `json:"serial"`
+	SessionID string    `json:"session_id,omitempty"`
+	Outcome   string    `json:"outcome"`
+	ExitCode  int       `json:"exit_code"`
+	Err       string    `json:"err,omitempty"`
+	Elevation string    `json:"elevation,omitempty"`
+	PTY       bool      `json:"pty,omitempty"`
+	Seq       uint64    `json:"seq"`
+	PrevHash  string    `json:"prev_hash"`
+	Sig       string    `json:"sig"`
+}
+
+func cmdAudit(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl audit {tail|show|verify} [flags]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "tail":
+		cmdAuditTail(args[1:])
+	case "show":
+		cmdAuditShow(args[1:])
+	case "verify":
+		cmdAuditVerify(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown audit subcommand: %q\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func cmdAuditTail(args []string) {
+	fs := flag.NewFlagSet("audit tail", flag.ExitOnError)
+	logPath := fs.String("log", "", "path to audit log file (required)")
+	n := fs.Int("n", 20, "number of recent entries to show before following")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl audit tail --log <path> [-n N]")
+		fs.PrintDefaults()
+	}
+	must(fs.Parse(args))
+	if *logPath == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	printAuditHeader(w)
+
+	lines, offset, err := lastNLines(*logPath, *n)
+	if err != nil && !os.IsNotExist(err) {
+		fatalf("open log: %v", err)
+	}
+	for _, line := range lines {
+		printAuditLine(w, line)
+	}
+	w.Flush()
+
+	// Stream new entries as they are written.
+	followFile(*logPath, offset, func(line []byte) {
+		printAuditLine(w, line)
+		w.Flush()
+	})
+}
+
+func cmdAuditShow(args []string) {
+	fs := flag.NewFlagSet("audit show", flag.ExitOnError)
+	logPath := fs.String("log", "", "path to audit log file (required)")
+	host := fs.String("host", "", "filter by host (substring match)")
+	caller := fs.String("caller", "", "filter by caller (substring match)")
+	outcome := fs.String("outcome", "", "filter by exact outcome (e.g. executed, denied, issued)")
+	serial := fs.Uint64("serial", 0, "filter by exact serial number (0 = no filter)")
+	since := fs.String("since", "", "show entries after this time (RFC3339 or YYYY-MM-DD)")
+	limit := fs.Int("limit", 0, "max entries to return (0 = no limit)")
+	asJSON := fs.Bool("json", false, "output as raw JSON lines (compatible with jq)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl audit show --log <path> [filters] [--json]")
+		fs.PrintDefaults()
+	}
+	must(fs.Parse(args))
+	if *logPath == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	var sinceTime time.Time
+	if *since != "" {
+		var err error
+		sinceTime, err = parseAuditTime(*since)
+		if err != nil {
+			fatalf("invalid --since value %q: %v", *since, err)
+		}
+	}
+
+	f, err := os.Open(*logPath)
+	if err != nil {
+		fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	var tw *tabwriter.Writer
+	if !*asJSON {
+		tw = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		printAuditHeader(tw)
+	}
+
+	count := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e auditEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			continue // skip malformed lines silently
+		}
+
+		// Apply filters (all ANDed).
+		if *host != "" && !strings.Contains(e.Host, *host) {
+			continue
+		}
+		if *caller != "" && !strings.Contains(e.Caller, *caller) {
+			continue
+		}
+		if *outcome != "" && e.Outcome != *outcome {
+			continue
+		}
+		if *serial != 0 && e.Serial != *serial {
+			continue
+		}
+		if !sinceTime.IsZero() && e.Time.Before(sinceTime) {
+			continue
+		}
+
+		if *asJSON {
+			os.Stdout.Write(line)
+			os.Stdout.Write([]byte{'\n'})
+		} else {
+			printAuditRow(tw, e)
+		}
+		count++
+		if *limit > 0 && count >= *limit {
+			break
+		}
+	}
+	if err := sc.Err(); err != nil {
+		fatalf("read error: %v", err)
+	}
+	if !*asJSON {
+		tw.Flush()
+		if count == 0 {
+			fmt.Fprintln(os.Stderr, "(no matching entries)")
+		}
+	}
+}
+
+func cmdAuditVerify(args []string) {
+	fs := flag.NewFlagSet("audit verify", flag.ExitOnError)
+	logPath := fs.String("log", "", "path to audit log file (required)")
+	keyPath := fs.String("key", "", "path to audit seed file for Ed25519 signature verification (optional)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl audit verify --log <path> [--key seed-path]")
+		fs.PrintDefaults()
+	}
+	must(fs.Parse(args))
+	if *logPath == "" {
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	// Derive public key from seed if provided.
+	var pubKey ed25519.PublicKey
+	if *keyPath != "" {
+		seed, err := os.ReadFile(*keyPath)
+		if err != nil {
+			fatalf("read key: %v", err)
+		}
+		if len(seed) < ed25519.SeedSize {
+			fatalf("seed file too short (need %d bytes, got %d)", ed25519.SeedSize, len(seed))
+		}
+		privKey := ed25519.NewKeyFromSeed(seed[:ed25519.SeedSize])
+		pubKey = privKey.Public().(ed25519.PublicKey)
+	}
+
+	f, err := os.Open(*logPath)
+	if err != nil {
+		fatalf("open log: %v", err)
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+
+	var prevHash string
+	var prevSeq uint64
+	total, errs := 0, 0
+	first := true
+
+	for sc.Scan() {
+		rawLine := sc.Bytes()
+		if len(rawLine) == 0 {
+			continue
+		}
+		// Copy before next Scan() invalidates the buffer.
+		line := make([]byte, len(rawLine))
+		copy(line, rawLine)
+
+		var e auditEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: malformed JSON (seq %d): %v\n", e.Seq, err)
+			errs++
+			continue
+		}
+		total++
+
+		// 1. Sequence monotonicity.
+		if !first && e.Seq != prevSeq+1 {
+			fmt.Fprintf(os.Stderr, "ERROR: seq %d — expected %d (gap or reorder)\n", e.Seq, prevSeq+1)
+			errs++
+		}
+
+		// 2. Hash chain: prev_hash of entry N must equal SHA-256 of raw line N-1.
+		if !first && e.PrevHash != prevHash {
+			fmt.Fprintf(os.Stderr, "ERROR: seq %d — prev_hash mismatch\n  expected: %s\n  got:      %s\n",
+				e.Seq, prevHash, e.PrevHash)
+			errs++
+		}
+
+		// 3. Ed25519 signature (optional).
+		if pubKey != nil {
+			sigB64 := e.Sig
+			sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ERROR: seq %d — invalid sig encoding: %v\n", e.Seq, err)
+				errs++
+			} else {
+				// Canonical payload is the entry marshaled with Sig="".
+				e.Sig = ""
+				payload, merr := json.Marshal(e)
+				if merr != nil {
+					fmt.Fprintf(os.Stderr, "ERROR: seq %d — marshal for sig check: %v\n", e.Seq, merr)
+					errs++
+				} else if !ed25519.Verify(pubKey, payload, sigBytes) {
+					fmt.Fprintf(os.Stderr, "ERROR: seq %d — signature invalid\n", e.Seq)
+					errs++
+				}
+				e.Sig = sigB64
+			}
+		}
+
+		sum := sha256.Sum256(line)
+		prevHash = hex.EncodeToString(sum[:])
+		prevSeq = e.Seq
+		first = false
+	}
+	if err := sc.Err(); err != nil {
+		fatalf("read error: %v", err)
+	}
+
+	if errs == 0 {
+		if pubKey != nil {
+			fmt.Printf("OK: %d entries, chain intact, all signatures valid\n", total)
+		} else {
+			fmt.Printf("OK: %d entries, chain intact (pass --key to also verify signatures)\n", total)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "FAIL: %d entries checked, %d error(s) found\n", total, errs)
+		os.Exit(1)
+	}
+}
+
+// printAuditHeader writes the column header for the audit table.
+func printAuditHeader(w *tabwriter.Writer) {
+	fmt.Fprintln(w, "TIME\tSEQ\tCALLER\tHOST\tOUTCOME\tSERIAL\tDETAIL")
+}
+
+// printAuditLine parses a raw JSON line and appends one table row.
+func printAuditLine(w *tabwriter.Writer, line []byte) {
+	var e auditEntry
+	if err := json.Unmarshal(line, &e); err != nil {
+		return
+	}
+	printAuditRow(w, e)
+}
+
+// printAuditRow formats a single audit entry as a tab-delimited row.
+func printAuditRow(w *tabwriter.Writer, e auditEntry) {
+	t := e.Time.UTC().Format("2006-01-02T15:04:05Z")
+	fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%d\t%s\n",
+		t, e.Seq, e.Caller, e.Host, e.Outcome, e.Serial, auditDetail(e))
+}
+
+// auditDetail builds the DETAIL column: command + [sudo:X] [pty] [err: ...].
+func auditDetail(e auditEntry) string {
+	var b strings.Builder
+	b.WriteString(e.Command)
+	if e.Elevation != "" {
+		fmt.Fprintf(&b, " [%s]", e.Elevation)
+	}
+	if e.PTY {
+		b.WriteString(" [pty]")
+	}
+	if e.Err != "" {
+		fmt.Fprintf(&b, " [err: %s]", e.Err)
+	}
+	return b.String()
+}
+
+// lastNLines reads the last n non-empty lines of path and returns them together
+// with the file's current byte offset (used as the start position for followFile).
+func lastNLines(path string, n int) ([][]byte, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+	var ring [][]byte
+	for sc.Scan() {
+		b := sc.Bytes()
+		if len(b) == 0 {
+			continue
+		}
+		line := make([]byte, len(b))
+		copy(line, b)
+		ring = append(ring, line)
+		if len(ring) > n {
+			ring = ring[1:]
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, 0, err
+	}
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return ring, 0, nil
+	}
+	return ring, size, nil
+}
+
+// followFile polls path every 500 ms and calls fn for each new complete line.
+// If the file shrinks (log rotation), it restarts from the beginning of the
+// new file.
+func followFile(path string, offset int64, fn func([]byte)) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		fi, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if fi.Size() < offset {
+			offset = 0 // rotation: restart from top
+		}
+		if fi.Size() == offset {
+			continue // no new data
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 256*1024), 256*1024)
+		for sc.Scan() {
+			b := sc.Bytes()
+			offset += int64(len(b)) + 1 // +1 for the stripped newline
+			if len(b) == 0 {
+				continue
+			}
+			line := make([]byte, len(b))
+			copy(line, b)
+			fn(line)
+		}
+		f.Close()
+	}
+}
+
+// parseAuditTime accepts RFC3339 ("2006-01-02T15:04:05Z") or date-only
+// ("2006-01-02", interpreted as midnight UTC).
+func parseAuditTime(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("expected RFC3339 (e.g. 2026-06-05T12:00:00Z) or YYYY-MM-DD")
 }

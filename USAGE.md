@@ -16,6 +16,7 @@ parameters or behaviour change.
 4. [Common patterns](#4-common-patterns)
 5. [Error handling](#5-error-handling)
 6. [Quick reference](#6-quick-reference)
+7. [Reviewing audit logs](#7-reviewing-audit-logs)
 
 ---
 
@@ -520,3 +521,154 @@ tool: ssh_session_exec  command: "echo bar"
    ssh_session_exec (×N)
    ssh_session_close         → always close when done
 ```
+
+---
+
+## 7. Reviewing audit logs
+
+Both the broker and the signer write append-only, Ed25519-signed, SHA-256-chained
+audit logs. Every entry carries a `serial` (issued by the signer) and a `seq`
+(monotonic per log), allowing precise correlation across the three audit sources
+(signer, broker, sshd).
+
+Default log paths (from the active config):
+
+| Service | Log file | Signing seed |
+|---|---|---|
+| Broker | `audit.log` | `pki/audit.seed` |
+| Signer | `signer_audit.log` | `pki/signer_audit.seed` |
+
+### 7.1 Live tail
+
+Follow the broker log as commands execute:
+
+```bash
+broker-ctl audit tail --log audit.log
+broker-ctl audit tail --log audit.log -n 50   # show last 50 lines before following
+```
+
+Follow the signer log (certificate issuances):
+
+```bash
+broker-ctl audit tail --log signer_audit.log
+```
+
+Output columns: `TIME · SEQ · CALLER · HOST · OUTCOME · SERIAL · DETAIL`
+
+### 7.2 Searching and filtering
+
+Filter by host (substring match):
+
+```bash
+broker-ctl audit show --log audit.log --host web01
+```
+
+Filter by outcome:
+
+```bash
+# Broker outcomes: executed, denied, error, session_open, session_exec, session_close
+broker-ctl audit show --log audit.log --outcome denied
+
+# Signer outcomes: issued, denied, reloaded, reload-denied, reload-failed
+broker-ctl audit show --log signer_audit.log --outcome issued
+```
+
+Filter by caller:
+
+```bash
+broker-ctl audit show --log audit.log --caller mcp-stdio
+```
+
+Filter by time window:
+
+```bash
+broker-ctl audit show --log audit.log --since 2026-06-05
+broker-ctl audit show --log audit.log --since 2026-06-05T12:00:00Z
+```
+
+Combine filters and limit output:
+
+```bash
+broker-ctl audit show --log audit.log --host db01 --outcome denied --limit 20
+```
+
+### 7.3 jq pipelines
+
+Raw JSON output (`--json`) pipes directly into `jq`:
+
+```bash
+# All denied entries as pretty JSON:
+broker-ctl audit show --log audit.log --outcome denied --json | jq .
+
+# Extract serial numbers from denied signer entries:
+broker-ctl audit show --log signer_audit.log --outcome denied --json \
+  | jq -r .serial
+
+# Correlate broker and signer by serial — find the cert that matches execution 1042:
+broker-ctl audit show --log audit.log        --json | jq 'select(.serial==1042)'
+broker-ctl audit show --log signer_audit.log --json | jq 'select(.serial==1042)'
+
+# Count executions per host in the last hour:
+broker-ctl audit show --log audit.log \
+  --since "$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  --outcome executed --json \
+  | jq -r .host | sort | uniq -c | sort -rn
+
+# Show all sudo (elevated) entries:
+broker-ctl audit show --log audit.log --json \
+  | jq 'select(.elevation != null and .elevation != "")'
+
+# Show all PTY sessions:
+broker-ctl audit show --log audit.log --json | jq 'select(.pty == true)'
+```
+
+### 7.4 Verifying chain integrity
+
+Verify hash chain only (no key needed):
+
+```bash
+broker-ctl audit verify --log audit.log
+# OK: 1234 entries, chain intact (pass --key to also verify signatures)
+
+broker-ctl audit verify --log signer_audit.log
+```
+
+Verify hash chain **and** Ed25519 signatures:
+
+```bash
+broker-ctl audit verify --log audit.log        --key pki/audit.seed
+broker-ctl audit verify --log signer_audit.log --key pki/signer_audit.seed
+# OK: 1234 entries, chain intact, all signatures valid
+```
+
+If tampering is detected, `verify` exits with code 1 and prints the affected
+sequence number(s):
+
+```
+ERROR: seq 42 — prev_hash mismatch
+  expected: 3a7f...
+  got:      000...
+FAIL: 1234 entries checked, 1 error(s) found
+```
+
+### 7.5 Audit entry fields reference
+
+| Field | Type | Description |
+|---|---|---|
+| `time` | RFC3339 | Timestamp (UTC) |
+| `seq` | uint64 | Monotonic counter within this log file |
+| `caller` | string | Broker CN (mTLS) or OIDC `sub` (HTTP) |
+| `host` | string | Logical host name (broker) or FQDN/addr (signer) |
+| `user` | string | Remote SSH account |
+| `principal` | string | SSH certificate principal |
+| `command` | string | Command executed (one-shot) or session mode |
+| `ttl` | string | Certificate TTL granted |
+| `serial` | uint64 | Certificate serial — correlates broker ↔ signer ↔ sshd |
+| `session_id` | string | Session UUID (session events only) |
+| `outcome` | string | See table in §7.2 |
+| `exit_code` | int | Remote exit code (execution events) |
+| `err` | string | Error detail (on failure) |
+| `elevation` | string | `sudo:root` or `sudo:<user>` if escalated |
+| `pty` | bool | `true` if PTY was requested |
+| `prev_hash` | string | SHA-256 hex of the previous raw JSON line |
+| `sig` | string | Base64 Ed25519 signature over the entry (with `sig=""`) |
