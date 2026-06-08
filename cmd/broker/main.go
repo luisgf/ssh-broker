@@ -66,7 +66,7 @@ func main() {
 			http.Error(w, "petición inválida", http.StatusBadRequest)
 			return
 		}
-		res, err := eng.Execute(broker.Caller{ID: caller}, req.Host, req.Command, req.TTLSeconds,
+		res, err := eng.Execute(r.Context(), broker.Caller{ID: caller}, req.Host, req.Command, req.TTLSeconds,
 			broker.ExecOptions{Sudo: req.Sudo, SudoUser: req.SudoUser, PTY: req.PTY})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)

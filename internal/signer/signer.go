@@ -10,6 +10,7 @@
 package signer
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -129,7 +130,7 @@ type Decision struct {
 
 // Signer emite un certificado a partir de una intención.
 type Signer interface {
-	SignIntent(Intent) (*Issued, error)
+	SignIntent(context.Context, Intent) (*Issued, error)
 }
 
 // HostPolicy es la política de emisión para un host, y también la fuente de
@@ -426,7 +427,7 @@ func NewLocal(caKey ssh.Signer, policy PolicyTable, defaultTTL time.Duration) *L
 // En dry-run no se emite certificado: se resuelve la política y se devuelve la
 // decisión. Una denegación de política en dry-run es un resultado (Allowed=false),
 // no un error; solo los fallos de configuración (regex inválida) devuelven error.
-func (l *Local) SignIntent(in Intent) (*Issued, error) {
+func (l *Local) SignIntent(_ context.Context, in Intent) (*Issued, error) {
 	d, err := l.policy.Resolve(in, l.defaultTTL)
 	if in.DryRun {
 		if err != nil {

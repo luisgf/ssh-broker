@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -167,7 +168,7 @@ type SessionResult struct {
 //   - shell: un /bin/sh con estado (cd, variables). Con sudo, el shell completo
 //     se lanza bajo sudo (sesión elevada).
 //   - pty:   igual que shell pero con PTY (permit-pty en el cert).
-func (e *Engine) OpenSession(c Caller, host, mode string, ttlSeconds int, opts ExecOptions) (*SessionResult, error) {
+func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, ttlSeconds int, opts ExecOptions) (*SessionResult, error) {
 	if _, ok := e.hostInfo(host); !ok {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "denied", Err: "host desconocido"})
 		return nil, fmt.Errorf("host desconocido: %q", host)
@@ -184,7 +185,7 @@ func (e *Engine) OpenSession(c Caller, host, mode string, ttlSeconds int, opts E
 		opts.PTY = true
 	}
 
-	hops, serial, elevPrefix, err := e.buildHopsWithPrefix(c, host, e.ttlFor(ttlSeconds), signer.PurposeSession, opts)
+	hops, serial, elevPrefix, err := e.buildHopsWithPrefix(ctx, c, host, e.ttlFor(ttlSeconds), signer.PurposeSession, opts)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "error", Err: err.Error()})
 		return nil, err
@@ -254,7 +255,7 @@ func (e *Engine) OpenSession(c Caller, host, mode string, ttlSeconds int, opts E
 
 // SessionExec ejecuta command en una sesión existente, reutilizando la conexión.
 // En sesiones exec con elevación, antepone el prefijo autorizado por el signer.
-func (e *Engine) SessionExec(c Caller, sessionID, command string) (*Result, error) {
+func (e *Engine) SessionExec(_ context.Context, c Caller, sessionID, command string) (*Result, error) {
 	s, ok := e.sessions.get(sessionID)
 	if !ok {
 		return nil, fmt.Errorf("sesión desconocida o expirada: %q", sessionID)

@@ -298,7 +298,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		EndUser:       req.EndUser,
 		EndUserGroups: req.EndUserGroups,
 	}
-	issued, err := local.SignIntent(in)
+	issued, err := local.SignIntent(r.Context(), in)
 	if err != nil {
 		s.auditEmission(caller, req, hosts, 0, "denied", err)
 		http.Error(w, err.Error(), http.StatusForbidden)
