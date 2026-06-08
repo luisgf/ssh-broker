@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"crypto/ed25519"
 	"path/filepath"
 	"strings"
@@ -215,7 +216,7 @@ func TestSessionExecOwnershipC1(t *testing.T) {
 	_ = e.sessions.add(s)
 
 	// "bob" no debería poder ejecutar en la sesión de "alice".
-	_, err := e.SessionExec(Caller{ID: "bob"}, "sess-alice", "id")
+	_, err := e.SessionExec(context.Background(), Caller{ID: "bob"}, "sess-alice", "id")
 	if err == nil {
 		t.Fatal("SessionExec con caller incorrecto debe devolver error (C1)")
 	}
@@ -227,7 +228,7 @@ func TestSessionExecOwnershipC1(t *testing.T) {
 func TestSessionExecSesionDesconocida(t *testing.T) {
 	e := engineForSessionTests(t)
 
-	_, err := e.SessionExec(Caller{ID: "alice"}, "nonexistent", "id")
+	_, err := e.SessionExec(context.Background(), Caller{ID: "alice"}, "nonexistent", "id")
 	if err == nil {
 		t.Fatal("SessionExec con sesión desconocida debe devolver error")
 	}
@@ -240,7 +241,7 @@ func TestSessionExecComandoVacio(t *testing.T) {
 	s.mode = "exec"
 	_ = e.sessions.add(s)
 
-	_, err := e.SessionExec(Caller{ID: "alice"}, "sess-empty", "")
+	_, err := e.SessionExec(context.Background(), Caller{ID: "alice"}, "sess-empty", "")
 	if err == nil {
 		t.Fatal("SessionExec con comando vacío debe devolver error")
 	}
@@ -257,7 +258,7 @@ func TestSessionExecRechazaNewlineModoShell(t *testing.T) {
 		_ = e.sessions.add(s)
 
 		for _, injected := range []string{"cmd\nmalicious", "cmd\rmalicious", "line1\nline2\nline3"} {
-			_, err := e.SessionExec(Caller{ID: "alice"}, "sess-"+mode, injected)
+			_, err := e.SessionExec(context.Background(), Caller{ID: "alice"}, "sess-"+mode, injected)
 			if err == nil {
 				t.Errorf("mode=%s cmd=%q: esperaba error por newline (M5)", mode, injected)
 			}

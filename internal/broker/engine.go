@@ -5,6 +5,7 @@
 package broker
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -186,11 +187,16 @@ type Result struct {
 	DryRun *signer.DecisionInfo
 }
 
+// hostFetcher obtiene la lista de hosts del signer. Implementada por *signer.Remote.
+type hostFetcher interface {
+	FetchHosts(context.Context, string) (map[string]signer.HostInfo, error)
+}
+
 // Engine ejecuta comandos firmando credenciales efímeras y auditando.
 type Engine struct {
 	cfg      *Config
 	sgn      signer.Signer
-	fetcher  *signer.Remote // nil en modo local
+	fetcher  hostFetcher // nil en modo local
 	auditLog *audit.Log
 	maxTTL   time.Duration
 	sessions *sessionManager
@@ -244,7 +250,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 
 	// Modo remoto: carga inicial de hosts y arranca la goroutine de recarga.
 	if fetcher != nil {
-		h, err := fetcher.FetchHosts("")
+		h, err := fetcher.FetchHosts(context.Background(), "")
 		if err != nil {
 			al.Close()
 			return nil, fmt.Errorf("carga inicial de hosts desde signer: %w", err)
@@ -269,7 +275,7 @@ func (e *Engine) startHostRefresh(interval time.Duration) {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
-			h, err := e.fetcher.FetchHosts("")
+			h, err := e.fetcher.FetchHosts(context.Background(), "")
 			if err != nil {
 				log.Printf("advertencia: recarga de hosts fallida: %v (manteniendo cache anterior)", err)
 				continue
@@ -284,7 +290,7 @@ func (e *Engine) startHostRefresh(interval time.Duration) {
 
 // buildSigner construye un firmante remoto (si hay bloque Signer) o local.
 // Devuelve también el *Remote para FetchHosts (nil en modo local).
-func buildSigner(cfg *Config, maxTTL time.Duration) (signer.Signer, *signer.Remote, error) {
+func buildSigner(cfg *Config, maxTTL time.Duration) (signer.Signer, hostFetcher, error) {
 	if cfg.Signer != nil {
 		tlsCfg, err := auth.ClientTLSConfig(cfg.Signer.ClientCert, cfg.Signer.ClientKey, cfg.Signer.CA)
 		if err != nil {
@@ -404,7 +410,7 @@ func (e *Engine) Servers() []string {
 // Execute firma un cert efímero acotado (con force-command, y sudo si se pide),
 // ejecuta command en host de un disparo (a través de bastión si está configurado)
 // y audita.
-func (e *Engine) Execute(c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
+func (e *Engine) Execute(ctx context.Context, c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
 	if _, ok := e.hostInfo(host); !ok {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "denied", Err: "host desconocido"})
 		return nil, fmt.Errorf("host desconocido: %q", host)
@@ -414,10 +420,10 @@ func (e *Engine) Execute(c Caller, host, command string, ttlSeconds int, opts Ex
 	}
 
 	if opts.DryRun {
-		return e.dryRun(c, host, command, ttlSeconds, opts)
+		return e.dryRun(ctx, c, host, command, ttlSeconds, opts)
 	}
 
-	hops, serial, err := e.buildHops(c, host, e.ttlFor(ttlSeconds), signer.PurposeOneshot, command, opts)
+	hops, serial, err := e.buildHops(ctx, c, host, e.ttlFor(ttlSeconds), signer.PurposeOneshot, command, opts)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "error", Err: err.Error()})
 		return nil, err
@@ -451,7 +457,7 @@ func (e *Engine) Execute(c Caller, host, command string, ttlSeconds int, opts Ex
 // dryRun resuelve la política para el host destino y devuelve la decisión sin
 // conectar ni ejecutar. Solo evalúa el destino (la command policy vive ahí); no
 // firma certificados usables ni recorre la cadena de bastiones.
-func (e *Engine) dryRun(c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
+func (e *Engine) dryRun(ctx context.Context, c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
 	_, pub, err := ca.GenerateEphemeralKey()
 	if err != nil {
 		return nil, err
@@ -471,7 +477,7 @@ func (e *Engine) dryRun(c Caller, host, command string, ttlSeconds int, opts Exe
 		EndUser:       c.ID,
 		EndUserGroups: c.Groups,
 	}
-	issued, err := e.sgn.SignIntent(in)
+	issued, err := e.sgn.SignIntent(ctx, in)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "error", DryRun: true, Err: err.Error()})
 		return nil, err
@@ -502,7 +508,7 @@ func (e *Engine) ttlFor(ttlSeconds int) time.Duration {
 
 // buildHops resuelve la cadena destino→…→bastión y, por hop, genera un par efímero
 // y pide al firmante un cert para la intención.
-func (e *Engine) buildHops(c Caller, host string, ttl time.Duration, purpose, command string, opts ExecOptions) ([]sshrun.Hop, uint64, error) {
+func (e *Engine) buildHops(ctx context.Context, c Caller, host string, ttl time.Duration, purpose, command string, opts ExecOptions) ([]sshrun.Hop, uint64, error) {
 	chain, err := e.resolveChain(host)
 	if err != nil {
 		return nil, 0, err
@@ -536,7 +542,7 @@ func (e *Engine) buildHops(c Caller, host string, ttl time.Duration, purpose, co
 			in.SudoUser = opts.SudoUser
 			in.PTY = opts.PTY
 		}
-		issued, err := e.sgn.SignIntent(in)
+		issued, err := e.sgn.SignIntent(ctx, in)
 		if err != nil {
 			return nil, 0, fmt.Errorf("firmar cert de %q: %w", name, err)
 		}
@@ -560,7 +566,7 @@ func (e *Engine) buildHops(c Caller, host string, ttl time.Duration, purpose, co
 
 // buildHopsWithPrefix es igual que buildHops pero además devuelve el
 // ElevationPrefix emitido por el firmante para el hop target (sesiones).
-func (e *Engine) buildHopsWithPrefix(c Caller, host string, ttl time.Duration, purpose string, opts ExecOptions) ([]sshrun.Hop, uint64, string, error) {
+func (e *Engine) buildHopsWithPrefix(ctx context.Context, c Caller, host string, ttl time.Duration, purpose string, opts ExecOptions) ([]sshrun.Hop, uint64, string, error) {
 	chain, err := e.resolveChain(host)
 	if err != nil {
 		return nil, 0, "", err
@@ -593,7 +599,7 @@ func (e *Engine) buildHopsWithPrefix(c Caller, host string, ttl time.Duration, p
 			in.SudoUser = opts.SudoUser
 			in.PTY = opts.PTY
 		}
-		issued, err := e.sgn.SignIntent(in)
+		issued, err := e.sgn.SignIntent(ctx, in)
 		if err != nil {
 			return nil, 0, "", fmt.Errorf("firmar cert de %q: %w", name, err)
 		}

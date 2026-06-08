@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"context"
 	"crypto/ed25519"
 	"path/filepath"
 	"reflect"
@@ -73,7 +74,7 @@ func dryRunEngine(t *testing.T) *Engine {
 
 func TestExecuteDryRunAllowed(t *testing.T) {
 	e := dryRunEngine(t)
-	res, err := e.Execute(Caller{ID: "tester"}, "locked", "uptime", 0, ExecOptions{DryRun: true})
+	res, err := e.Execute(context.Background(), Caller{ID: "tester"}, "locked", "uptime", 0, ExecOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("dry-run no debe fallar: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestExecuteDryRunAllowed(t *testing.T) {
 
 func TestExecuteDryRunDenied(t *testing.T) {
 	e := dryRunEngine(t)
-	res, err := e.Execute(Caller{ID: "tester"}, "locked", "rm -rf /", 0, ExecOptions{DryRun: true})
+	res, err := e.Execute(context.Background(), Caller{ID: "tester"}, "locked", "rm -rf /", 0, ExecOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("una denegación de política en dry-run es resultado, no error: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestExecuteDryRunRequireApproval(t *testing.T) {
 	e := dryRunEngine(t)
 	// systemctl restart está en la allowlist Y casa require_approval: permitido
 	// pero marcado como pendiente de aprobación humana.
-	res, err := e.Execute(Caller{ID: "tester"}, "locked", "systemctl restart nginx", 0, ExecOptions{DryRun: true})
+	res, err := e.Execute(context.Background(), Caller{ID: "tester"}, "locked", "systemctl restart nginx", 0, ExecOptions{DryRun: true})
 	if err != nil {
 		t.Fatalf("dry-run no debe fallar: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestExecuteDryRunRequireApproval(t *testing.T) {
 		t.Error("Result.DryRun.RequireApproval debe ser true")
 	}
 	// systemctl status: permitido y sin aprobación.
-	res2, _ := e.Execute(Caller{ID: "tester"}, "locked", "systemctl status nginx", 0, ExecOptions{DryRun: true})
+	res2, _ := e.Execute(context.Background(), Caller{ID: "tester"}, "locked", "systemctl status nginx", 0, ExecOptions{DryRun: true})
 	if res2.DryRun == nil || !res2.DryRun.Allowed || res2.DryRun.RequireApproval {
 		t.Errorf("systemctl status: permitido sin aprobación, got %+v", res2.DryRun)
 	}
@@ -129,7 +130,7 @@ func TestExecuteDryRunRequireApproval(t *testing.T) {
 
 func TestExecuteDryRunUnknownHost(t *testing.T) {
 	e := dryRunEngine(t)
-	if _, err := e.Execute(Caller{ID: "tester"}, "nope", "uptime", 0, ExecOptions{DryRun: true}); err == nil {
+	if _, err := e.Execute(context.Background(), Caller{ID: "tester"}, "nope", "uptime", 0, ExecOptions{DryRun: true}); err == nil {
 		t.Error("host desconocido debe fallar incluso en dry-run")
 	}
 }

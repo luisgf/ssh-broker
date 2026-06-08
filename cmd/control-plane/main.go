@@ -182,7 +182,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pubkey inválida", http.StatusBadRequest)
 			return
 		}
-		issued, err := s.remote.SignIntent(in)
+		issued, err := s.remote.SignIntent(r.Context(), in)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
@@ -213,7 +213,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				din.DryRun = true
-				d, err := s.remote.SignIntent(din)
+				d, err := s.remote.SignIntent(r.Context(), din)
 				if err != nil || d.Decision == nil || !d.Decision.Allowed {
 					s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "denied", Anomaly: strings.Join(anomalies, ","), Err: errString(err)})
 					http.Error(w, "comando no permitido", http.StatusForbidden)
@@ -233,7 +233,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "pubkey inválida", http.StatusBadRequest)
 		return
 	}
-	issued, err := s.remote.SignIntent(in)
+	issued, err := s.remote.SignIntent(r.Context(), in)
 	if err != nil {
 		s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "denied", Err: err.Error()})
 		http.Error(w, err.Error(), http.StatusForbidden)
@@ -319,7 +319,7 @@ func (s *server) handleResult(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "pubkey inválida", http.StatusBadRequest)
 			return
 		}
-		issued, err := s.remote.SignIntent(in)
+		issued, err := s.remote.SignIntent(r.Context(), in)
 		if err != nil || issued.Certificate == nil {
 			s.auditE(audit.Entry{Caller: a.Caller, Host: a.Host, Command: a.Command, Outcome: "error", ApprovalID: a.ID, Err: errString(err)})
 			http.Error(w, "firma tras aprobación fallida", http.StatusBadGateway)
@@ -343,7 +343,7 @@ func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no autenticado", http.StatusUnauthorized)
 		return
 	}
-	hosts, err := s.remote.FetchHosts(brokerCN)
+	hosts, err := s.remote.FetchHosts(r.Context(), brokerCN)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

@@ -113,7 +113,7 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, executeOutput{}, nil
 		}
 		opts := broker.ExecOptions{Sudo: in.Sudo, SudoUser: in.SudoUser, PTY: in.PTY, DryRun: in.DryRun}
-		res, err := eng.Execute(callerFn(ctx), in.Server, in.Command, in.TTLSeconds, opts)
+		res, err := eng.Execute(ctx, callerFn(ctx), in.Server, in.Command, in.TTLSeconds, opts)
 		if err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
@@ -169,7 +169,7 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, sessionOpenOutput{}, nil
 		}
 		opts := broker.ExecOptions{Sudo: in.Sudo, SudoUser: in.SudoUser}
-		r, err := eng.OpenSession(callerFn(ctx), in.Server, in.Mode, in.TTLSeconds, opts)
+		r, err := eng.OpenSession(ctx, callerFn(ctx), in.Server, in.Mode, in.TTLSeconds, opts)
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, sessionOpenOutput{}, nil
 		}
@@ -187,7 +187,7 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 		if err := validateInput(map[string]string{"session_id": in.SessionID, "command": in.Command}); err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, executeOutput{}, nil
 		}
-		res, err := eng.SessionExec(callerFn(ctx), in.SessionID, in.Command)
+		res, err := eng.SessionExec(ctx, callerFn(ctx), in.SessionID, in.Command)
 		if err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, executeOutput{}, nil
 		}

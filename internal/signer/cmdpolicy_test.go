@@ -1,6 +1,7 @@
 package signer
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
@@ -210,7 +211,7 @@ func TestSignIntentApprovalGate(t *testing.T) {
 
 	// Sin aprobación: requiere aprobación → no se emite certificado.
 	noApproval := base
-	issued, err := l.SignIntent(noApproval)
+	issued, err := l.SignIntent(context.Background(), noApproval)
 	if err != nil {
 		t.Fatalf("no debe error, debe devolver decisión: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestSignIntentApprovalGate(t *testing.T) {
 	// Con aprobación: se emite el certificado.
 	approved := base
 	approved.Approved = true
-	issued2, err := l.SignIntent(approved)
+	issued2, err := l.SignIntent(context.Background(), approved)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +239,7 @@ func TestResolveDryRunInfoViaLocal(t *testing.T) {
 	// SignIntent en dry-run no debe emitir cert y debe reportar la decisión.
 	l := NewLocal(nil, cmdPolicyTable(), 5*time.Minute)
 	// Comando denegado → Allowed=false, sin error.
-	issued, err := l.SignIntent(Intent{
+	issued, err := l.SignIntent(context.Background(), Intent{
 		Host: "locked", Role: RoleTarget, Purpose: PurposeOneshot,
 		Command: "halt", RequestedTTL: time.Minute, DryRun: true,
 	})
