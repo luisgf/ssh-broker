@@ -1,6 +1,6 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
-> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-08 (v1.7.0 — AI-action firewall completo: Fase A command policy + dry-run, Fase B control plane + aprobación, Fase C guardrails de comportamiento + rate limiting).
+> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-08 (v1.7.1 — cobertura de tests de alta prioridad: cadena criptográfica de auditoría, sessionManager + fixes de seguridad C1/M5, verificación de integridad en broker-ctl).
 
 ---
 
@@ -43,6 +43,9 @@ A partir de v1.4.0 existe un **tercer frontend** (`cmd/mcp-broker-http`) que exp
 │   │                             # host add/list/remove, reload (SIGHUP local o HTTP mTLS)
 │   │                             # approval list/allow/deny (mTLS al control plane)
 │   │                             # preserva campos _comment al editar el JSON
+│   │                             # audit tail/show/verify (incluyendo verificación Ed25519)
+│   ├── broker-ctl/main_test.go   # tests verifyLog (cadena, firmas, gaps, hash, manipulación),
+│   │                             #   lastNLines, parseAuditTime, splitComma, boolStr, auditDetail
 │   └── broker/main.go            # frontend HTTP+mTLS alternativo (one-shot)
 ├── internal/
 │   ├── ca/
@@ -67,9 +70,12 @@ A partir de v1.4.0 existe un **tercer frontend** (`cmd/mcp-broker-http`) que exp
 │   │   ├── engine.go             # Engine: Caller{ID,Groups}, ExecOptions{Sudo,SudoUser,PTY},
 │   │   │                         # Execute, buildHops, buildHopsWithPrefix,
 │   │   │                         # OAuthConfig, Config.OAuth/ResourceURL
-│   │   ├── engine_test.go        # tests de resolveChain (ciclos, cadenas)
-│   │   └── session.go            # sessionManager, OpenSession, SessionExec, CloseSession
-│   │                             # (firmas actualizadas a Caller)
+│   │   ├── engine_test.go        # tests de resolveChain (ciclos, cadenas) y dry-run
+│   │   ├── session.go            # sessionManager, OpenSession, SessionExec, CloseSession
+│   │   │                         # (firmas actualizadas a Caller)
+│   │   └── session_test.go       # tests sessionManager (add/get/remove, límites M2,
+│   │                             #   reaper); seguridad C1 (ownership SessionExec/Close);
+│   │                             #   inyección M5 (newlines shell/pty); helpers internos
 │   ├── mcpserver/
 │   │   ├── server.go             # New(eng, callerFn) — construye *mcp.Server
 │   │   └── tools.go              # Register: 5 tools compartidas por stdio y HTTP
@@ -85,6 +91,9 @@ A partir de v1.4.0 existe un **tercer frontend** (`cmd/mcp-broker-http`) que exp
 │   │                             # OpenShellPTY(client, shellCmd, opts) — con PTY
 │   ├── audit/log.go              # Entry: Elevation string + PTY bool (omitempty)
 │   │                             # log append-only firmado y encadenado (Ed25519)
+│   ├── audit/log_test.go         # tests cadena criptográfica: Seq, PrevHash, firma Ed25519,
+│   │                             #   restoreChain (nuevo/vacío/reinicio/JSON roto),
+│   │                             #   maybeRotate (rotación activa y deshabilitada), Close
 │   └── auth/mtls.go              # ServerTLSConfig, ClientTLSConfig, CallerCN
 │                                 # ServerTLSConfigNoClientAuth (para frontend HTTP+OAuth)
 ├── lab/
@@ -194,7 +203,7 @@ broker-ctl audit verify --log signer_audit.log --key pki/signer_audit.seed
 
 **Binarios compilados:** `~/bin/mcp-broker` · `~/bin/mcp-broker-http` · `~/bin/signer` · `~/bin/broker-ctl`
 
-**Estado de compilación y tests:** `go build ./...` ✅ · `go vet ./...` ✅ · `go test ./...` ✅
+**Estado de compilación y tests:** `go build ./...` ✅ · `go vet ./...` ✅ · `go test ./...` ✅ (83 casos pre-existentes + 47 nuevos = 130 casos en total)
 
 **MCP registrado en OpenCode:** `~/.config/opencode/opencode.json`
 
@@ -736,7 +745,32 @@ Incorporado en `README.md` (sección *Comparison with existing solutions*). Resu
 - **Rate limiting:** Teleport y Vault ambos lo implementan por identidad de cliente.
 - **Una CA por grupo:** Vault soporta roles de CA independientes por política; Teleport por host role.
 
-## Puntos de atención para la próxima sesión
+---
+
+## Estado del plan de pruebas (v1.7.1)
+
+130 casos totales en 11 paquetes. Resumen por componente:
+
+| Paquete | Casos | Cobertura |
+|---|---|---|
+| `internal/ca` | 4 | ✅ Completa: sign, bastion, TTL, cert verify |
+| `internal/signer` | 39 | ✅ Completa: policy, RBAC, sudo, PTY, dry-run, approval gate |
+| `internal/control` | 14 | ✅ Completa: approval registry, behavior tracker |
+| `internal/oauth` | 5 | ✅ Completa: valid/expired/wrong-aud/bad-sig/missing-claim |
+| `internal/audit` | 11 | ✅ **Nuevo (v1.7.1)**: cadena hash, firmas Ed25519, restoreChain, maybeRotate |
+| `internal/broker` | 25 | ✅ **Ampliado (v1.7.1)**: sessionManager, límites M2, C1 ownership, M5 newlines, helpers |
+| `cmd/control-plane` | 8 | ✅ Completa: forwarding, approval flow, behavior, ownership |
+| `cmd/signer` | 4 | ✅ resolveCaller (4 sub-tests) |
+| `cmd/mcp-broker-http` | 3 | ✅ OAuth auth, 401, RFC 9728 metadata |
+| `cmd/broker-ctl` | 17 | ✅ **Nuevo (v1.7.1)**: verifyLog (7 casos), lastNLines, parseAuditTime, splitComma, boolStr, auditDetail |
+
+### Gaps conocidos pendientes (media/baja prioridad)
+
+- **`cmd/signer/main.go` — handlers HTTP** (`handleSign`, `handleHosts`, `handleReload`): solo `resolveCaller` tiene test. Los handlers se ejercitan indirectamente a través del `stubSigner` en `cmd/control-plane`, pero no el signer real. Patrón para implementarlos: `httptest.Server` + TLS sintético, igual que `cmd/control-plane/main_test.go`.
+- **`internal/ssh` (con sshd embebido)**: `limitedWriter` y helpers de shell son puramente unitarios y sencillos; el protocolo de marcadores de `ShellSession.Exec`, `OpenShell` y `OpenShellPTY` requieren un servidor SSH real o la librería `gliderlabs/ssh`.
+- **`cmd/broker-ctl` — subcomandos restantes**: `cmdHostAdd`, `cmdHostList`, `cmdHostRemove`, `cmdReload`, `cmdApprovalDecide` y `sshKeyscan` no tienen tests (requieren ficheros reales o mocks de `exec.Command`).
+
+
 
 1. **El signer debe estar corriendo** antes de arrancar el broker (o de que OpenCode conecte al MCP). Arrancar siempre con `./signer.sh start` antes de abrir OpenCode.
 2. **`hosts_refresh_seconds: 30`** está configurado para desarrollo. En producción subir a 300 (5 min) o más.

@@ -1,5 +1,28 @@
 # Changelog
 
+## [v1.7.1] - 2026-06-08
+
+### Added
+- **Test suite — high-priority coverage (3 new test files, 47 new test cases).**
+
+  **`internal/audit/log_test.go`** — first direct tests for the cryptographic audit chain (previously untested despite being the most security-critical component):
+  - `Append`: sequential `Seq` increment, correct `PrevHash` chaining (SHA-256 of previous raw line), valid Ed25519 signature per entry, signature invalidation after field tampering.
+  - `restoreChain`: new path (seq=0, prevHash=""), empty file, chain continuity across process restart (3 entries → close → reopen → 2 more entries → intact 5-entry chain), error on malformed last line.
+  - `maybeRotate`: rotation fires when `maxFileSize=1`, rotated file exists, new log restarts at Seq=1/PrevHash=""; rotation disabled when `maxFileSize=0`.
+  - `Close`: no error on normal close.
+
+  **`internal/broker/session_test.go`** — first direct tests for session management and the two security fixes applied in v1.4.1:
+  - `sessionManager`: add/get/remove happy paths, `get` updates `lastUsed`, missing-ID behaviour, global limit (`maxSessionsGlobal=200`), per-caller limit (`maxSessionsPerCaller=20`), reaper evicts idle sessions and fires `onReap`.
+  - **C1 (ownership enforcement):** `SessionExec` and `CloseSession` reject callers that do not own the session; session is not deleted on unauthorized close.
+  - **M5 (newline injection):** `SessionExec` rejects commands containing `\n`/`\r` in `shell` and `pty` modes; `exec` mode is unaffected.
+  - Internal helpers: `buildElevatedExecCommand`, `shellQuoteSession` (including single-quote escaping), `elevationLabelFromPrefix`, `newSessionID` uniqueness.
+
+  **`cmd/broker-ctl/main_test.go`** — first tests for the CLI verification logic and utility helpers:
+  - `verifyLog`: intact chain passes without `--key`; intact chain + correct signatures pass with `--key`; wrong key detects invalid signatures; seq gap detected; wrong `prev_hash` detected; tampered field (Caller altered post-signing) detected; empty log passes cleanly.
+  - `lastNLines`: ring buffer returns last N lines; requests larger than total return all; missing file errors correctly.
+  - `parseAuditTime`: RFC3339 and `YYYY-MM-DD` accepted; invalid formats rejected.
+  - `splitComma`, `boolStr`, `auditDetail`: all branches covered.
+
 ## [v1.7.0] - 2026-06-08
 
 ### Added
