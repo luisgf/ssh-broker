@@ -1,6 +1,6 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
-> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-08 (v1.8.0 — Teams notifier: Adaptive Card + MessageCard + approval_url_template; diseño de Fase 2 (bridge de aprobación bidireccional) documentado como decisión #15).
+> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-08 (v1.9.1 — fases de calidad de código F1–F4: gofmt, writeJSON, t.Parallel, context.Context, refactor funciones largas; CODING_STYLE.md creado).
 
 ---
 
@@ -203,7 +203,7 @@ broker-ctl audit verify --log signer_audit.log --key pki/signer_audit.seed
 
 **Binarios compilados:** `~/bin/mcp-broker` · `~/bin/mcp-broker-http` · `~/bin/signer` · `~/bin/broker-ctl`
 
-**Estado de compilación y tests:** `go build ./...` ✅ · `go vet ./...` ✅ · `go test ./...` ✅ (83 casos pre-existentes + 47 v1.7.1 + 18 v1.8.0 = 148 casos en total)
+**Estado de compilación y tests:** `go build ./...` ✅ · `go vet ./...` ✅ · `go test -race ./...` ✅ (148 casos v1.8.0 + paralelización en 63 casos v1.8.2 = 148 casos totales, sin data races)
 
 **MCP registrado en OpenCode:** `~/.config/opencode/opencode.json`
 
@@ -597,6 +597,54 @@ Evoluciona el bloque `approval` actual hacia listas: múltiples notificadores si
 
 **Recomendación:** Opción A (bot + bridge) cuando se quiera aprobar desde móvil/Teams con identidad real. Opción C es el estado actual y suficiente para muchos despliegues.
 
+### 16. Calidad de código — fases F1–F4 (v1.8.1–v1.9.1)
+
+Cuatro fases de mejora técnica ejecutadas tras la entrega de v1.8.0. No hay cambio de comportamiento externo en ninguna de ellas.
+
+#### F1 — v1.8.1: higiene básica (`fix/code-quality-f1`)
+
+- `gofmt -w` aplicado a 5 archivos (`internal/audit/log.go`, `internal/oauth/verifier.go`, `internal/signer/signer.go`, `internal/ssh/shell.go`, `cmd/broker-ctl/main_test.go`).
+- Helper `writeJSON(w, status, v)` introducido en `cmd/signer/main.go` y `cmd/broker/main.go`; ya existía en `cmd/control-plane/main.go` (unificado). Todos los `_ = json.NewEncoder(w).Encode(...)` en handlers HTTP reemplazados — los errores de escritura ahora se registran en el log.
+
+#### F2 — v1.8.2: tests en paralelo (`fix/code-quality-f2`)
+
+`t.Parallel()` añadido como primera sentencia en 63 tests unitarios en 6 paquetes:
+
+| Paquete | Tests paralelizados |
+|---|---|
+| `internal/control/approval_test.go` | 7 |
+| `internal/control/behavior_test.go` | 7 |
+| `internal/signer/signer_test.go` | 22 |
+| `internal/signer/cmdpolicy_test.go` | 12 |
+| `internal/ca/sign_test.go` | 4 |
+| `internal/audit/log_test.go` | 11 |
+
+`go test -race ./...` pasa sin data races — confirma que los mutexes en `Registry`, `BehaviorTracker`, `PolicyTable` y `Logger` son correctos.
+
+#### F3 — v1.9.0: `context.Context` en la pila de llamadas (`feature/context-propagation`)
+
+`context.Context` añadido como primer parámetro en todas las funciones que hacen I/O de red:
+
+- `signer.Signer` interface: `SignIntent(context.Context, Intent)` — **cambio de interfaz, minor bump**.
+- `signer.Remote.SignIntent`: usa `http.NewRequestWithContext`; ctx cancel activa.
+- `signer.Remote.FetchHosts`: idem.
+- `signer.Remote.pollApproval`: `select{ case <-ctx.Done() }` en lugar de `time.Sleep`.
+- `Engine.Execute`, `dryRun`, `buildHops`, `buildHopsWithPrefix`, `OpenSession`, `SessionExec`.
+- Handlers HTTP: `r.Context()` propagado a `SignIntent` y `FetchHosts`.
+- `mcpserver/tools.go`: ctx del tool handler propagado al engine.
+
+**Bug corregido:** `buildSigner` devolvía `*signer.Remote` (tipo concreto nil). Asignado a la interfaz `hostFetcher` producía una interfaz no-nil, rompiendo el guard `fetcher != nil` en modo local (causaba que `ServerInfos`/`hostInfo` buscaran en `e.hosts` vacío en lugar de `cfg.Hosts`). Solución: `buildSigner` ahora devuelve `hostFetcher` directamente.
+
+#### F4 — v1.9.1: refactor de funciones largas (`fix/code-quality-f4`)
+
+| Función original | Líneas antes → después | Funciones extraídas |
+|---|---|---|
+| `PolicyTable.Resolve` (`internal/signer/signer.go`) | 106 → 65 | `resolveCommandPolicy`, `buildConstraints` |
+| `handleSign` (`cmd/signer/main.go`) | 109 → 75 | `respondSignResult` |
+| `handleSign` (`cmd/control-plane/main.go`) | 104 → 50 | `checkBehaviorGuardrails`, `forwardSignResult` |
+
+**Documento de estilo creado:** `CODING_STYLE.md` — reglas Go aplicables al proyecto con criterio mecánico de verificación (ver sección "Flujo de trabajo" para el checklist).
+
 ### 13. Hardening de seguridad v1.4.1 (revisión MCP/Snyk)
 
 Doce hallazgos corregidos en orden de criticidad (C → A → M → L):
@@ -748,6 +796,8 @@ Estos archivos son la **documentación viva del proyecto**: un commit sin ellos 
 
 **Language:** all commit messages, new documentation files (`README.md`, `API.md`, guides, etc.) and comments in new code must be written in **English**. Existing internal files (`HANDOFF.md`, `CHANGELOG.md`, comments in existing Go code) may remain in Spanish.
 
+**Coding style:** ver `CODING_STYLE.md` — reglas Go con criterio de verificación mecánico. Checklist rápido antes de cada commit: `gofmt -l .` vacío · `go vet ./...` limpio · `go test -race ./...` verde · ninguna función > 80 líneas · nuevas funciones I/O aceptan `ctx context.Context` · `t.Parallel()` en tests unitarios puros.
+
 ### Procedimiento: commit en `main` (docs, config, hotfix)
 
 ```bash
@@ -819,27 +869,29 @@ Incorporado en `README.md` (sección *Comparison with existing solutions*). Resu
 
 ---
 
-## Estado del plan de pruebas (v1.7.1)
+## Estado del plan de pruebas (v1.9.1)
 
-130 casos totales en 11 paquetes. Resumen por componente:
+148 casos totales en 11 paquetes. Todos los tests pasan con `go test -race ./...` (sin data races detectados).
 
-| Paquete | Casos | Cobertura |
-|---|---|---|
-| `internal/ca` | 4 | ✅ Completa: sign, bastion, TTL, cert verify |
-| `internal/signer` | 39 | ✅ Completa: policy, RBAC, sudo, PTY, dry-run, approval gate |
-| `internal/control` | 39 | ✅ **Ampliado (v1.8.0)**: approval registry, behavior tracker, Teams notifier (18 casos: formatos, facts, URL template, seguridad, errores HTTP) |
-| `internal/oauth` | 5 | ✅ Completa: valid/expired/wrong-aud/bad-sig/missing-claim |
-| `internal/audit` | 11 | ✅ **Nuevo (v1.7.1)**: cadena hash, firmas Ed25519, restoreChain, maybeRotate |
-| `internal/broker` | 25 | ✅ **Ampliado (v1.7.1)**: sessionManager, límites M2, C1 ownership, M5 newlines, helpers |
-| `cmd/control-plane` | 8 | ✅ Completa: forwarding, approval flow, behavior, ownership |
-| `cmd/signer` | 4 | ✅ resolveCaller (4 sub-tests) |
-| `cmd/mcp-broker-http` | 3 | ✅ OAuth auth, 401, RFC 9728 metadata |
-| `cmd/broker-ctl` | 17 | ✅ **Nuevo (v1.7.1)**: verifyLog (7 casos), lastNLines, parseAuditTime, splitComma, boolStr, auditDetail |
+| Paquete | Casos | Cobertura | Notas |
+|---|---|---|---|
+| `internal/ca` | 4 | ✅ Completa | sign, bastion, TTL, cert verify |
+| `internal/signer` | 39 | ✅ Completa | policy, RBAC, sudo, PTY, dry-run, approval gate |
+| `internal/control` | 39 | ✅ Completa | approval registry, behavior tracker, Teams notifier (18 casos) |
+| `internal/oauth` | 5 | ✅ Completa | valid/expired/wrong-aud/bad-sig/missing-claim |
+| `internal/audit` | 11 | ✅ Completa | cadena hash, firmas Ed25519, restoreChain, maybeRotate |
+| `internal/broker` | 25 | ✅ Completa | sessionManager, límites M2, C1 ownership, M5 newlines |
+| `cmd/control-plane` | 8 | ✅ Completa | forwarding, approval flow, behavior, ownership |
+| `cmd/signer` | 4 | ✅ resolveCaller (4 sub-tests) | handlers HTTP indirectos vía control-plane |
+| `cmd/mcp-broker-http` | 3 | ✅ OAuth auth, 401, RFC 9728 | |
+| `cmd/broker-ctl` | 17 | ✅ Completa | verifyLog (7 casos), lastNLines, parseAuditTime |
+
+**Todos paralelizados** (v1.8.2): 63 tests unitarios en `internal/` usan `t.Parallel()`.
 
 ### Gaps conocidos pendientes (media/baja prioridad)
 
-- **`cmd/signer/main.go` — handlers HTTP** (`handleSign`, `handleHosts`, `handleReload`): solo `resolveCaller` tiene test. Los handlers se ejercitan indirectamente a través del `stubSigner` en `cmd/control-plane`, pero no el signer real. Patrón para implementarlos: `httptest.Server` + TLS sintético, igual que `cmd/control-plane/main_test.go`.
-- **`internal/ssh` (con sshd embebido)**: `limitedWriter` y helpers de shell son puramente unitarios y sencillos; el protocolo de marcadores de `ShellSession.Exec`, `OpenShell` y `OpenShellPTY` requieren un servidor SSH real o la librería `gliderlabs/ssh`.
+- **`cmd/signer/main.go` — handlers HTTP** (`handleSign`, `handleHosts`, `handleReload`): solo `resolveCaller` tiene test. Los handlers se ejercitan indirectamente a través del `stubSigner` en `cmd/control-plane`, pero no el signer real. Patrón: `httptest.Server` + TLS sintético, igual que `cmd/control-plane/main_test.go`.
+- **`internal/ssh` (con sshd embebido)**: `limitedWriter` y helpers de shell son puramente unitarios; el protocolo de marcadores de `ShellSession.Exec`, `OpenShell` y `OpenShellPTY` requieren un servidor SSH real o la librería `gliderlabs/ssh`.
 - **`cmd/broker-ctl` — subcomandos restantes**: `cmdHostAdd`, `cmdHostList`, `cmdHostRemove`, `cmdReload`, `cmdApprovalDecide` y `sshKeyscan` no tienen tests (requieren ficheros reales o mocks de `exec.Command`).
 
 
