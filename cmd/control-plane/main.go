@@ -191,41 +191,9 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Guardrails de comportamiento. El sujeto es el usuario final si la petición lo
-	// porta (frontend OIDC); si no, el CN del broker.
-	if s.behavior.Enabled() {
-		subject := req.EndUser
-		if subject == "" {
-			subject = brokerCN
-		}
-		anomalies, exceeded := s.behavior.Check(subject, req.Host, req.Command)
-		if s.behavior.Enforcing() {
-			if exceeded {
-				s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "rate-limited", Anomaly: "rate-exceeded"})
-				http.Error(w, "límite de tasa excedido", http.StatusTooManyRequests)
-				return
-			}
-			if len(anomalies) > 0 {
-				// Verificar que el comando sería permitido antes de molestar a un humano.
-				din, err := intentFrom(req, brokerCN, false)
-				if err != nil {
-					http.Error(w, "pubkey inválida", http.StatusBadRequest)
-					return
-				}
-				din.DryRun = true
-				d, err := s.remote.SignIntent(r.Context(), din)
-				if err != nil || d.Decision == nil || !d.Decision.Allowed {
-					s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "denied", Anomaly: strings.Join(anomalies, ","), Err: errString(err)})
-					http.Error(w, "comando no permitido", http.StatusForbidden)
-					return
-				}
-				s.requireApproval(w, brokerCN, req, "behavior", strings.Join(anomalies, ","))
-				return
-			}
-		} else if len(anomalies) > 0 || exceeded {
-			// Modo observe: auditar la anomalía y continuar.
-			s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "anomaly", Anomaly: strings.Join(anomalies, ",")})
-		}
+	// Guardrails de comportamiento.
+	if s.behavior.Enabled() && !s.checkBehaviorGuardrails(w, r, brokerCN, req) {
+		return
 	}
 
 	in, err := intentFrom(req, brokerCN, false)
@@ -239,8 +207,53 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	s.forwardSignResult(w, r, brokerCN, req, issued)
+}
 
-	// Permitido y emitido: reenviar el certificado.
+// checkBehaviorGuardrails evalúa los guardrails de comportamiento. Devuelve true
+// si la petición puede continuar, false si ya se respondió (bloqueada/escalada).
+func (s *server) checkBehaviorGuardrails(w http.ResponseWriter, r *http.Request, brokerCN string, req signer.WireRequest) bool {
+	subject := req.EndUser
+	if subject == "" {
+		subject = brokerCN
+	}
+	anomalies, exceeded := s.behavior.Check(subject, req.Host, req.Command)
+	if !s.behavior.Enforcing() {
+		// Modo observe: auditar la anomalía y continuar.
+		if len(anomalies) > 0 || exceeded {
+			s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "anomaly", Anomaly: strings.Join(anomalies, ",")})
+		}
+		return true
+	}
+	// Modo enforce.
+	if exceeded {
+		s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "rate-limited", Anomaly: "rate-exceeded"})
+		http.Error(w, "límite de tasa excedido", http.StatusTooManyRequests)
+		return false
+	}
+	if len(anomalies) > 0 {
+		// Verificar que el comando sería permitido antes de molestar a un humano.
+		din, err := intentFrom(req, brokerCN, false)
+		if err != nil {
+			http.Error(w, "pubkey inválida", http.StatusBadRequest)
+			return false
+		}
+		din.DryRun = true
+		d, err := s.remote.SignIntent(r.Context(), din)
+		if err != nil || d.Decision == nil || !d.Decision.Allowed {
+			s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "denied", Anomaly: strings.Join(anomalies, ","), Err: errString(err)})
+			http.Error(w, "comando no permitido", http.StatusForbidden)
+			return false
+		}
+		s.requireApproval(w, brokerCN, req, "behavior", strings.Join(anomalies, ","))
+		return false
+	}
+	return true
+}
+
+// forwardSignResult responde al broker con el resultado de una firma del signer.
+// Cubre los tres estados: cert emitido, aprobación requerida y error inesperado.
+func (s *server) forwardSignResult(w http.ResponseWriter, _ *http.Request, brokerCN string, req signer.WireRequest, issued *signer.Issued) {
 	if issued.Certificate != nil {
 		s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Serial: issued.Serial, Outcome: "forwarded"})
 		writeJSON(w, http.StatusOK, signer.WireResponse{
@@ -251,13 +264,10 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	// Sin certificado: la command policy requiere aprobación humana.
 	if issued.Decision != nil && issued.Decision.RequireApproval {
 		s.requireApproval(w, brokerCN, req, issued.Decision.MatchedRule, "")
 		return
 	}
-
 	// Estado inesperado: ni cert, ni dry-run, ni aprobación.
 	http.Error(w, "respuesta del signer sin certificado", http.StatusBadGateway)
 }

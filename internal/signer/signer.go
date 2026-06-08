@@ -200,35 +200,18 @@ func (p PolicyTable) Resolve(in Intent, defaultMaxTTL time.Duration) (Decision, 
 		return Decision{}, fmt.Errorf("host %q no permitido como bastión", in.Host)
 	}
 
-	// Validar y construir prefijo de elevación.
 	elevationPrefix, err := resolveElevation(hp, in)
 	if err != nil {
 		return Decision{}, err
 	}
 
-	// Validar PTY.
 	if in.PTY && !hp.AllowPTY {
 		return Decision{}, fmt.Errorf("host %q no permite PTY (allow_pty=false)", in.Host)
 	}
 
-	// Command policy (AI-action firewall): autoritativa para one-shot en el destino.
-	// Las sesiones no son verificables (el comando no llega al firmante al firmar),
-	// así que se rechazan en hosts con cualquier regla de comando.
-	var requireApproval bool
-	var matchedRule string
-	if in.Role == RoleTarget && hp.CommandPolicy.Restricts() {
-		if in.Purpose == PurposeSession {
-			return Decision{}, fmt.Errorf("host %q tiene command_policy: las sesiones no están permitidas (el comando no es verificable al firmar)", in.Host)
-		}
-		allowed, needsApproval, rule, cerr := hp.CommandPolicy.Decide(in.Command)
-		if cerr != nil {
-			return Decision{}, fmt.Errorf("command_policy de %q: %w", in.Host, cerr)
-		}
-		if !allowed {
-			return Decision{}, fmt.Errorf("comando no permitido en %q por command_policy (%s)", in.Host, rule)
-		}
-		requireApproval = needsApproval
-		matchedRule = rule
+	requireApproval, matchedRule, err := resolveCommandPolicy(hp, in)
+	if err != nil {
+		return Decision{}, err
 	}
 
 	maxTTL := hp.MaxTTL
@@ -240,31 +223,7 @@ func (p PolicyTable) Resolve(in Intent, defaultMaxTTL time.Duration) (Decision, 
 		ttl = maxTTL
 	}
 
-	// Construir etiquetas para KeyID (trazabilidad en sshd).
-	keyIDParts := []string{
-		fmt.Sprintf("agent=%s", in.Caller),
-		fmt.Sprintf("host=%s", in.Host),
-		fmt.Sprintf("role=%s", in.Role),
-		fmt.Sprintf("t=%d", time.Now().Unix()),
-	}
-	if in.EndUser != "" {
-		keyIDParts = append(keyIDParts, fmt.Sprintf("user=%s", in.EndUser))
-	}
-	if elevationPrefix != "" {
-		keyIDParts = append(keyIDParts, fmt.Sprintf("elev=%s", elevationPrefix))
-	}
-	if in.PTY {
-		keyIDParts = append(keyIDParts, "pty=1")
-	}
-
-	c := ca.Constraints{
-		Principal:           hp.Principal,
-		TTL:                 ttl,
-		SourceAddress:       hp.SourceAddress,
-		AllowPortForwarding: in.Role == RoleBastion,
-		AllowPTY:            in.PTY,
-		KeyID:               strings.Join(keyIDParts, " "),
-	}
+	c := buildConstraints(hp, in, elevationPrefix, ttl)
 
 	// force-command solo para one-shot en el destino.
 	if in.Purpose == PurposeOneshot && in.Role == RoleTarget {
@@ -283,6 +242,55 @@ func (p PolicyTable) Resolve(in Intent, defaultMaxTTL time.Duration) (Decision, 
 		RequireApproval: requireApproval,
 		MatchedRule:     matchedRule,
 	}, nil
+}
+
+// resolveCommandPolicy evalúa la AI-action firewall para una Intent. Devuelve si
+// se requiere aprobación humana, qué regla casó, y cualquier error de configuración.
+func resolveCommandPolicy(hp HostPolicy, in Intent) (requireApproval bool, matchedRule string, err error) {
+	if in.Role != RoleTarget || !hp.CommandPolicy.Restricts() {
+		return false, "", nil
+	}
+	// Las sesiones no son verificables al firmar; se rechazan si hay command policy.
+	if in.Purpose == PurposeSession {
+		return false, "", fmt.Errorf("host %q tiene command_policy: las sesiones no están permitidas (el comando no es verificable al firmar)", in.Host)
+	}
+	allowed, needsApproval, rule, cerr := hp.CommandPolicy.Decide(in.Command)
+	if cerr != nil {
+		return false, "", fmt.Errorf("command_policy de %q: %w", in.Host, cerr)
+	}
+	if !allowed {
+		return false, "", fmt.Errorf("comando no permitido en %q por command_policy (%s)", in.Host, rule)
+	}
+	return needsApproval, rule, nil
+}
+
+// buildConstraints ensambla el ca.Constraints a partir de la política del host,
+// la Intent y los valores resueltos (prefijo de elevación y TTL efectivo).
+// El ForceCommand no se establece aquí; Resolve lo añade para one-shot targets.
+func buildConstraints(hp HostPolicy, in Intent, elevationPrefix string, ttl time.Duration) ca.Constraints {
+	keyIDParts := []string{
+		fmt.Sprintf("agent=%s", in.Caller),
+		fmt.Sprintf("host=%s", in.Host),
+		fmt.Sprintf("role=%s", in.Role),
+		fmt.Sprintf("t=%d", time.Now().Unix()),
+	}
+	if in.EndUser != "" {
+		keyIDParts = append(keyIDParts, fmt.Sprintf("user=%s", in.EndUser))
+	}
+	if elevationPrefix != "" {
+		keyIDParts = append(keyIDParts, fmt.Sprintf("elev=%s", elevationPrefix))
+	}
+	if in.PTY {
+		keyIDParts = append(keyIDParts, "pty=1")
+	}
+	return ca.Constraints{
+		Principal:           hp.Principal,
+		TTL:                 ttl,
+		SourceAddress:       hp.SourceAddress,
+		AllowPortForwarding: in.Role == RoleBastion,
+		AllowPTY:            in.PTY,
+		KeyID:               strings.Join(keyIDParts, " "),
+	}
 }
 
 // resolveElevation valida la solicitud de elevación contra la política del host

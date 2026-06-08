@@ -304,7 +304,12 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	s.respondSignResult(w, caller, req, hosts, issued)
+}
 
+// respondSignResult audita el resultado de una firma y escribe la respuesta HTTP.
+// Cubre los tres casos: dry-run, approval-required y cert emitido.
+func (s *server) respondSignResult(w http.ResponseWriter, caller string, req signer.WireRequest, hosts signer.PolicyTable, issued *signer.Issued) {
 	// Dry-run: no se emite certificado; se devuelve solo la decisión y se audita.
 	if req.DryRun {
 		outcome := "dry_run_allowed"
