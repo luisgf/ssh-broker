@@ -1,5 +1,26 @@
 # Changelog
 
+## [v1.6.0] - 2026-06-06
+
+### Added
+- **Control plane (`cmd/control-plane`) — human-in-the-loop approval (Phase B).** A new service sits between the broker and the signer (`broker → control-plane → signer`), enforcing approval of commands the command policy marks `require_approval`, **without holding the CA key** (zero-trust PEP/PDP split). Flow is asynchronous (no held connections):
+  1. Broker `POST /v1/sign` → control plane forwards to the signer.
+  2. If the command needs approval, the signer returns no certificate; the control plane creates a request, notifies out-of-band, and responds `202 {approval_id}`.
+  3. Broker polls `GET /v1/sign/result/{id}`.
+  4. A human approves via `broker-ctl approval allow <id>` → `POST /v1/approvals/{id}`.
+  5. The next poll re-signs with `approved=true` and returns the certificate. One approval mints exactly one certificate.
+- **Approval is inevadible.** The signer enforces the gate: a `require_approval` command is not issued unless `approved=true`, and `approved` (like `on_behalf_of`) is honored **only from `trusted_forwarders`** (the control plane's CN). A broker going direct to the signer cannot self-approve.
+- **Identity propagation + CN pinning.** `signer.json` gains `trusted_forwarders`. The control plane forwards the broker's identity via `on_behalf_of` (body, `/v1/sign`) and `X-On-Behalf-Of` (header, `/v1/hosts`); the signer honors it only from trusted forwarders, preserving per-broker RBAC through the proxy.
+- **Notifiers:** `log` (default; pair with `broker-ctl approval list`) and `webhook` (POST JSON, Slack-compatible).
+- `broker-ctl approval list|allow|deny` subcommands (mTLS to the control plane).
+- Broker config `signer.approval_wait_seconds`: how long the broker waits on a `202` before giving up.
+- Audit (control plane, own chained log): outcomes `forwarded`, `approval-required`, `approval-granted`, `approval-denied`, `approval-timeout`, `approval-decision-allow`; new entry fields `approval_id`, `approved_by`.
+- New `control-plane.example.json`; `signer.example.json` documents `trusted_forwarders`; `config.example.json` shows pointing the broker at the control plane with `approval_wait_seconds`.
+
+### Changed
+- `signer.Remote` now handles a `202` response by polling the approval result; `Remote.FetchHosts` takes an `onBehalfOf` argument (broker passes `""`).
+- `WireRequest` gains `dry_run` (Phase A), `on_behalf_of`, and `approved` fields; `Issued`/`WireResponse` may carry no certificate when approval is pending.
+
 ## [v1.5.0] - 2026-06-06
 
 ### Added

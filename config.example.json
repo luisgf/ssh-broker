@@ -1,11 +1,13 @@
 {
   "_comment": "Config del BROKER. Dos modos de firma: (LOCAL) define ca_key y la política va inline en hosts (principal/source_address/allow_sudo/allow_pty/command_policy); (REMOTO) define el bloque signer y la clave de CA + política viven en el servicio cmd/signer — en ese caso los hosts solo necesitan addr/user/host_key/jump y se ignoran ca_key/principal/source_address.",
 
+  "_signer_remoto_comment": "Modo REMOTO. url apunta al SIGNER directamente, o al CONTROL PLANE (cmd/control-plane) si se usa aprobación humana / guardrails — mismo protocolo. approval_wait_seconds: si la url es un control plane, cuánto espera el broker a que se resuelva una aprobación (respuesta 202); 0 = no esperar.",
   "_signer_remoto_example": {
-    "url": "https://signer.internal:9443",
+    "url": "https://control-plane.internal:7443",
     "client_cert": "pki/broker.crt",
     "client_key": "pki/broker.key",
-    "ca": "pki/signer_ca.crt"
+    "ca": "pki/signer_ca.crt",
+    "approval_wait_seconds": 120
   },
 
   "ca_key": "pki/ssh_ca",

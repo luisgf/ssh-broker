@@ -143,7 +143,7 @@ Declared in the host policy: in **external mode** under `hosts` in `signer.json`
 | `mode: "allowlist"` | The command must match at least one `allow` regex, else denied. |
 | `mode: "denylist"` | The command must not match any `deny` regex, else denied. |
 | `mode: "off"` (or absent) | No command restriction. |
-| `require_approval: [...]` | Regexes for commands that will require human approval (orchestrated by the control plane — Phase B; the signer surfaces the flag today). |
+| `require_approval: [...]` | Regexes for commands that require human approval before they run (orchestrated by the control plane — see [Human-in-the-loop approval](#human-in-the-loop-approval)). |
 
 - **Authoritative for one-shot:** the allowed command is baked into the cert's
   `force-command` by the CA key — inevadible. Rules are RE2 regexes (linear time,
@@ -165,6 +165,53 @@ ssh_execute(server="web01", command="systemctl restart nginx", dry_run=true)
   regla: require_approval:^systemctl restart
   force-command: systemctl restart nginx
 ```
+
+## Human-in-the-loop approval
+
+For the highest-risk commands, "allow/deny" isn't enough — you want a human in the
+loop. The optional **control plane** (`cmd/control-plane`) sits between the broker
+and the signer and gates `require_approval` commands behind out-of-band human
+approval, **without ever holding the CA key**.
+
+```
+        without control plane                 with control plane (approval)
+  broker ──mTLS──> signer            broker ──mTLS──> control-plane ──mTLS──> signer
+                   (CA key +                          (approval +            (CA key +
+                    RBAC + cmd                          notify +              RBAC + cmd
+                    policy + sign)                      polling)              policy + sign)
+```
+
+The split is a zero-trust **PEP/PDP**: the signer (which holds the CA key) stays
+minimal and stateless; the control plane (no CA key) holds the approval state and
+notification surface.
+
+**Flow (asynchronous — no held connections):**
+
+1. Broker requests a signature; the control plane forwards it to the signer.
+2. If the command matches `require_approval`, the signer returns **no
+   certificate**; the control plane records the request, notifies a human
+   (webhook/log), and answers `202 {approval_id}`.
+3. The broker polls until the request resolves.
+4. A human approves: `broker-ctl approval allow <id>`.
+5. The next poll re-signs (now `approved=true`) and returns the certificate. One
+   approval mints exactly one certificate.
+
+```bash
+broker-ctl approval list                 # pending requests (id, caller, host, command)
+broker-ctl approval allow <id>           # approve → the waiting broker proceeds
+broker-ctl approval deny  <id>           # deny → the broker's request fails
+```
+
+**Approval is inevadible.** The *signer* enforces the gate: a `require_approval`
+command is never issued unless `approved=true`, and `approved` — like
+`on_behalf_of` — is honored **only from `trusted_forwarders`** (the control
+plane's CN, pinned in `signer.json`). A broker that tries to bypass the control
+plane and call the signer directly cannot self-approve, and cannot impersonate
+another broker's identity for RBAC.
+
+Configure the broker to wait for approval by pointing its `signer.url` at the
+control plane and setting `signer.approval_wait_seconds` (see
+`config.example.json` and `control-plane.example.json`).
 
 ## Why ssh-broker
 
@@ -353,6 +400,7 @@ lightweight, self-hosted package.
 | MCP-native (AI agents) | ✅ | ✅ (2025) | ✅ (2025) | ❌ | ✅ |
 | OAuth2/OIDC on MCP transport | ✅ | ✅ | ✅ | ❌ | ❌ |
 | Per-command policy + dry-run (AI-action firewall) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Human-in-the-loop approval for AI commands | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Cryptographically chained audit log | ✅ | ❌ | ❌ | Partial | ❌ |
 | Single-binary / simple self-hosted | ✅ | ❌ | ❌ | ❌ | ✅ |
 | HSM/KMS for CA key | Roadmap | ✅ | ✅ | — | — |
@@ -429,7 +477,9 @@ See [`API.md`](API.md) for the full endpoint documentation.
 | `internal/broker/engine.go` | Core: config + hop chain + execute+audit (ExecOptions: Sudo/SudoUser/PTY) |
 | `internal/broker/session.go` | Session registry (pool) + reaper + escalation in sessions |
 | `internal/signer/*` | `Signer` interface, `Local`/`Remote`, policy and intent (allow_sudo, allow_pty) |
-| `cmd/signer/main.go` | External signing service (HTTP+mTLS) + issuance audit (escalation) |
+| `cmd/signer/main.go` | External signing service (HTTP+mTLS); command policy + approval gate; issuance audit |
+| `cmd/control-plane/main.go` | Approval orchestration between broker and signer (PEP); no CA key |
+| `internal/control/*` | Approval registry + notifiers (log/webhook) for human-in-the-loop |
 | `internal/ca/sign.go` | `GenerateEphemeralKey` + `BuildAndSign` (permit-pty, permit-port-forwarding) |
 | `internal/ssh/run.go` | Multi-hop dial (`Dial`/`Conn`) + one-shot execution with/without PTY |
 | `internal/ssh/shell.go` | Stateful shell: without PTY (`OpenShell`) and with PTY (`OpenShellPTY`) |

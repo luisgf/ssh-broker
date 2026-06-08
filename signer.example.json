@@ -16,6 +16,9 @@
   "_reload_comment": "CNs (del cert de cliente) autorizados a invocar POST /v1/reload para recargar en caliente la política de hosts, max_ttl_seconds y la clave de CA. Vacío o ausente = endpoint HTTP deshabilitado (403); SIGHUP sigue funcionando porque es local al host. listen, TLS y audit_log requieren reinicio.",
   "reload_callers": ["broker-admin"],
 
+  "_trusted_forwarders_comment": "CNs autorizados a actuar en nombre de otro broker (campo on_behalf_of / cabecera X-On-Behalf-Of). Es el CN del control plane (cmd/control-plane). Solo estos CNs pueden (a) suplantar la identidad del broker para RBAC y (b) marcar approved=true para emitir comandos que requieren aprobación. Un broker normal NO debe estar aquí. Vacío/ausente = nadie puede suplantar (broker→signer directo sigue funcionando).",
+  "trusted_forwarders": ["control-plane-1"],
+
   "_callers_comment": "RBAC por grupos. Mapea CN del cert mTLS del broker → grupos permitidos. Un CN ausente no tiene restricción de grupo (backward compatible): ve y firma todos los hosts. Un CN presente solo puede ver (/v1/hosts) y firmar (/v1/sign) hosts cuyo campo 'groups' intersecte con su allowed_groups. allowed_groups vacío = denegación total.",
   "callers": {
     "broker-1":    { "allowed_groups": ["prod-web", "databases"] },

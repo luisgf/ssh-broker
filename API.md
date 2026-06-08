@@ -12,6 +12,11 @@ request/response schema changes.
   - [POST /v1/sign](#post-v1sign)
   - [GET /v1/hosts](#get-v1hosts)
   - [POST /v1/reload](#post-v1reload)
+- [Control Plane API](#control-plane-api) — `cmd/control-plane` · HTTPS + mTLS · default `:7443`
+  - [POST /v1/sign](#post-v1sign-control-plane)
+  - [GET /v1/sign/result/{id}](#get-v1signresultid)
+  - [GET /v1/approvals](#get-v1approvals)
+  - [POST /v1/approvals/{id}](#post-v1approvalsid)
 - [Broker HTTP API](#broker-http-api) — `cmd/broker` · HTTPS + mTLS
   - [POST /v1/ssh\_run](#post-v1ssh_run)
 - [MCP HTTP API](#mcp-http-api) — `cmd/mcp-broker-http` · HTTPS + OAuth2/OIDC · default `:8443`
@@ -55,6 +60,8 @@ scoped certificate.
 | `sudo_user` | string | | Target user for sudo. Empty = `root`. Must match `allowed_sudo_users` if that list is set. |
 | `pty` | bool | | Request `permit-pty` in the certificate. Requires `allow_pty: true` on the host policy. |
 | `dry_run` | bool | | If true, resolve policy and return the `decision` **without** issuing a usable certificate. The response carries `decision` and omits `certificate`/`serial`. A policy denial in dry-run is reported as `decision.allowed=false` (HTTP 200), not a 403. |
+| `on_behalf_of` | string | | CN of the broker a trusted forwarder (control plane) is acting for. Honored **only** if the mTLS CN is in `trusted_forwarders`; otherwise the request is rejected (403). Used as the effective caller for RBAC. |
+| `approved` | bool | | Marks a `require_approval` command as approved. Honored **only** from a trusted forwarder. Without it, a `require_approval` command returns 200 with no certificate (see below). |
 | `end_user` | string | | OIDC identity of the end user (propagated by the HTTP frontend). Recorded in the audit log and embedded in the cert `KeyId` for `sshd` traceability. |
 | `end_user_groups` | []string | | OIDC groups of the end user. When non-nil, activates per-user RBAC: the host's `groups` field must intersect with this list. |
 
@@ -90,7 +97,16 @@ scoped certificate.
 | `403 Forbidden` | Host not in caller's allowed groups (RBAC); or policy denied (sudo not allowed, PTY not allowed, TTL cap exceeded, invalid `sudo_user`, etc.). |
 | `405 Method Not Allowed` | Request method is not `POST`. |
 
-**Audit outcomes:** `issued` on success, `denied` on any authorization or policy failure, `dry_run_allowed` / `dry_run_denied` for dry-run simulations.
+**Approval-required response (200 OK, no certificate):** when the command matches
+`command_policy.require_approval` and `approved` is not set (or not from a trusted
+forwarder), the signer returns 200 with `decision.require_approval=true` and **no**
+`certificate`. The control plane interprets this and orchestrates approval; a
+direct broker treats it as an error.
+
+**`GET /v1/hosts`** also honors `X-On-Behalf-Of` (header) from trusted forwarders,
+so the control plane can fetch the host list filtered by the original broker's groups.
+
+**Audit outcomes:** `issued` on success, `denied` on any authorization or policy failure, `approval-required` when a command needs approval and was not issued, `dry_run_allowed` / `dry_run_denied` for dry-run simulations.
 
 ---
 
@@ -169,6 +185,76 @@ If the new config is invalid, the current state is preserved intact.
 | `405 Method Not Allowed` | Request method is not `POST`. |
 
 **Audit outcomes:** `reloaded` on success, `reload-denied` on 403, `reload-failed` on 500.
+
+---
+
+## Control Plane API
+
+**Service:** `cmd/control-plane`
+**Transport:** HTTPS + mutual TLS (mTLS)
+**Default listen address:** `:7443` (configurable via `listen` in `control-plane.json`)
+**Auth:** every request requires a valid TLS client certificate signed by the
+configured `client_ca`. The CN identifies the broker (for `/v1/sign`,
+`/v1/hosts`, `/v1/sign/result`) or the approver (for `/v1/approvals`).
+
+The control plane speaks the **same wire protocol** as the signer for `/v1/sign`
+and `/v1/hosts` (it forwards to the signer, adding the broker's identity), and adds
+the approval endpoints below. The CA key lives only in the signer.
+
+---
+
+### POST /v1/sign (control plane)
+
+Same request body as the [signer `POST /v1/sign`](#post-v1sign). The control plane
+forwards to the signer on behalf of the calling broker (`on_behalf_of` = broker CN).
+
+**Responses:**
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Issued (allowed, no approval needed) — body is the signer's `WireResponse` with `certificate`. Or, for `dry_run`, the `decision`. |
+| `202 Accepted` | Approval required. Body: `{"approval_id": "...", "status": "pending"}`. The broker must poll `/v1/sign/result/{id}`. |
+| `403 Forbidden` | Denied by policy/RBAC at the signer. |
+
+---
+
+### GET /v1/sign/result/{id}
+
+Polled by the broker after a `202`. Only the broker that created the request (same
+mTLS CN) may read it.
+
+| Status | Meaning |
+|---|---|
+| `202 Accepted` | Still pending. Body: `{"status":"pending"}`. Keep polling. |
+| `200 OK` | Approved and signed — body is the `WireResponse` with `certificate`. Served once (the approval is then consumed). |
+| `403 Forbidden` | Approval denied, or caller is not the request owner. |
+| `408 Request Timeout` | Approval expired (TTL `approval.timeout_seconds`). |
+| `410 Gone` | Approval already consumed (certificate already issued). |
+| `404 Not Found` | Unknown approval id. |
+
+---
+
+### GET /v1/approvals
+
+Lists approval requests. **Auth:** CN must be in `approval.callers`.
+
+**Response (200 OK):** JSON array of `{id, caller, end_user, host, command, rule, status, created_at, decided_by, decided_at}` (the ephemeral public key is never exposed).
+
+---
+
+### POST /v1/approvals/{id}
+
+Resolve a pending request. **Auth:** CN must be in `approval.callers`.
+
+**Request body:** `{"approve": true}` (or `false` to deny).
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Decision recorded; body is the updated approval object. |
+| `403 Forbidden` | Caller not in `approval.callers`. |
+| `409 Conflict` | Request not pending (already decided or expired). |
+
+**Audit outcomes (control plane log):** `forwarded`, `approval-required`, `approval-decision-allow`, `approval-denied`, `approval-granted`, `approval-timeout`, `denied`.
 
 ---
 
@@ -428,6 +514,8 @@ serial in the `Accepted certificate` log line.
 | `pty` | `true` if a PTY was allocated (omitted otherwise). |
 | `policy_rule` | `command_policy` rule that drove the decision (omitted if none). |
 | `dry_run` | `true` if the entry is a dry-run simulation (nothing executed). |
+| `approval_id` | Approval request id (control plane log; omitted if none). |
+| `approved_by` | CN of the approver (control plane log; omitted if none). |
 | `err` | Error message on denial or failure (omitted on success). |
 | `prev_hash` | SHA-256 hex of the previous log line (chain integrity). |
 | `sig` | Ed25519 signature over the canonical JSON of this entry (tamper evidence). |
@@ -451,6 +539,12 @@ serial in the `Accepted certificate` log line.
 | `session_open` | Broker | Persistent session opened. |
 | `session_exec` | Broker | Command executed in a persistent session. |
 | `session_close` | Broker | Persistent session closed. |
+| `forwarded` | Control plane | Request forwarded to the signer and issued (no approval needed). |
+| `approval-required` | Control plane / Signer | Command needs human approval; request recorded. |
+| `approval-decision-allow` | Control plane | Approver allowed a pending request. |
+| `approval-denied` | Control plane | Approver denied the request (or poll after denial). |
+| `approval-granted` | Control plane | Certificate issued after approval. |
+| `approval-timeout` | Control plane | Approval expired before being decided. |
 
 **Correlating an execution end-to-end:**
 

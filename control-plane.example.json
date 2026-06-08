@@ -1,0 +1,29 @@
+{
+  "_comment": "Config del CONTROL PLANE (cmd/control-plane). Se sitúa entre el broker y el signer: reenvía las peticiones de firma propagando la identidad del broker (on_behalf_of) y orquesta la aprobación humana de comandos marcados como require_approval por la command policy. NO custodia la clave de CA (vive en el signer). Su CN de cliente mTLS frente al signer debe estar en 'trusted_forwarders' del signer.json.",
+
+  "listen": ":7443",
+
+  "_server_tls_comment": "mTLS de cara al BROKER: presenta server_cert y exige clientes (brokers y aprobadores) firmados por client_ca.",
+  "server_cert": "pki/control-plane.crt",
+  "server_key": "pki/control-plane.key",
+  "client_ca": "pki/mtls_ca.crt",
+
+  "_signer_comment": "Cliente mTLS hacia el SIGNER. El cert (CN=control-plane-1) debe estar en trusted_forwarders del signer.",
+  "signer": {
+    "url": "https://127.0.0.1:9443",
+    "client_cert": "pki/control-plane.crt",
+    "client_key": "pki/control-plane.key",
+    "ca": "pki/signer_ca.crt"
+  },
+
+  "_approval_comment": "Aprobación humana. notifier: 'log' (default, escribe la solicitud en el log; el aprobador usa 'broker-ctl approval list') o 'webhook' (POST JSON a webhook_url, p. ej. un receptor Slack). timeout_seconds: TTL de las solicitudes pendientes. callers: CNs autorizados a aprobar/denegar (POST /v1/approvals/{id}).",
+  "approval": {
+    "notifier": "log",
+    "webhook_url": "",
+    "timeout_seconds": 120,
+    "callers": ["broker-admin"]
+  },
+
+  "audit_log": "control_plane_audit.log",
+  "audit_key": "pki/control_plane_audit.seed"
+}
