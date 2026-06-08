@@ -113,12 +113,16 @@ type HostConfig struct {
 	CommandPolicy signer.CommandPolicy `json:"command_policy,omitempty"`
 }
 
-// SignerClientConfig configura el cliente del servicio de firma externo.
+// SignerClientConfig configura el cliente del servicio de firma externo (signer
+// directo o control plane).
 type SignerClientConfig struct {
 	URL        string `json:"url"`
 	ClientCert string `json:"client_cert"`
 	ClientKey  string `json:"client_key"`
 	CA         string `json:"ca"`
+	// ApprovalWaitSeconds: tiempo máximo que el broker espera a que se resuelva una
+	// aprobación humana (respuesta 202 del control plane). 0 = no esperar.
+	ApprovalWaitSeconds int `json:"approval_wait_seconds,omitempty"`
 }
 
 // Caller identifica el origen de una petición. ID es la identidad para auditoría
@@ -240,7 +244,7 @@ func NewEngine(cfg *Config) (*Engine, error) {
 
 	// Modo remoto: carga inicial de hosts y arranca la goroutine de recarga.
 	if fetcher != nil {
-		h, err := fetcher.FetchHosts()
+		h, err := fetcher.FetchHosts("")
 		if err != nil {
 			al.Close()
 			return nil, fmt.Errorf("carga inicial de hosts desde signer: %w", err)
@@ -265,7 +269,7 @@ func (e *Engine) startHostRefresh(interval time.Duration) {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
-			h, err := e.fetcher.FetchHosts()
+			h, err := e.fetcher.FetchHosts("")
 			if err != nil {
 				log.Printf("advertencia: recarga de hosts fallida: %v (manteniendo cache anterior)", err)
 				continue
@@ -287,6 +291,9 @@ func buildSigner(cfg *Config, maxTTL time.Duration) (signer.Signer, *signer.Remo
 			return nil, nil, fmt.Errorf("tls cliente de firma: %w", err)
 		}
 		r := signer.NewRemote(cfg.Signer.URL, tlsCfg, 0)
+		if cfg.Signer.ApprovalWaitSeconds > 0 {
+			r.SetApprovalWait(time.Duration(cfg.Signer.ApprovalWaitSeconds) * time.Second)
+		}
 		return r, r, nil
 	}
 	// Modo local: clave de CA en proceso + política derivada de los hosts.
@@ -533,6 +540,9 @@ func (e *Engine) buildHops(c Caller, host string, ttl time.Duration, purpose, co
 		if err != nil {
 			return nil, 0, fmt.Errorf("firmar cert de %q: %w", name, err)
 		}
+		if issued.Certificate == nil {
+			return nil, 0, approvalError(name, issued.Decision)
+		}
 		hostKey, err := ParseHostKey(hi.HostKey)
 		if err != nil {
 			return nil, 0, fmt.Errorf("host key de %q: %w", name, err)
@@ -587,6 +597,9 @@ func (e *Engine) buildHopsWithPrefix(c Caller, host string, ttl time.Duration, p
 		if err != nil {
 			return nil, 0, "", fmt.Errorf("firmar cert de %q: %w", name, err)
 		}
+		if issued.Certificate == nil {
+			return nil, 0, "", approvalError(name, issued.Decision)
+		}
 		hostKey, err := ParseHostKey(hi.HostKey)
 		if err != nil {
 			return nil, 0, "", fmt.Errorf("host key de %q: %w", name, err)
@@ -601,6 +614,17 @@ func (e *Engine) buildHopsWithPrefix(c Caller, host string, ttl time.Duration, p
 		}
 	}
 	return hops, finalSerial, elevPrefix, nil
+}
+
+// approvalError construye el error que ve un broker cuando un cert no se emite
+// por requerir aprobación humana. En la ruta directa broker→signer (sin control
+// plane) la aprobación no puede orquestarse, así que se informa al usuario.
+func approvalError(host string, d *signer.DecisionInfo) error {
+	rule := ""
+	if d != nil {
+		rule = d.MatchedRule
+	}
+	return fmt.Errorf("el comando en %q requiere aprobación humana (%s); usar el control plane para aprobarlo", host, rule)
 }
 
 // resolveChain devuelve la cadena de hosts en orden de marcado (bastión más

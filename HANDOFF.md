@@ -1,6 +1,6 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
-> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-06 (v1.5.0 — AI-action firewall Fase A: command policy + dry-run; análisis competitivo añadido).
+> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-06 (v1.6.0 — AI-action firewall Fase B: control plane + aprobación humana; Fase A: command policy + dry-run).
 
 ---
 
@@ -32,9 +32,15 @@ A partir de v1.4.0 existe un **tercer frontend** (`cmd/mcp-broker-http`) que exp
 │   ├── signer/main.go            # servicio de firma externo (HTTPS+mTLS)
 │   │                             # endpoints: POST /v1/sign, GET /v1/hosts, POST /v1/reload
 │   │                             # reload en caliente (hosts/max_ttl/ca_key) + SIGHUP
-│   │                             # /v1/sign: acepta end_user/end_user_groups para RBAC por usuario
+│   │                             # /v1/sign: end_user/end_user_groups (RBAC usuario),
+│   │                             # command policy + gate de aprobación, trusted_forwarders
+│   ├── control-plane/main.go     # PEP entre broker y signer (HTTPS+mTLS)
+│   │                             # reenvía /v1/sign,/v1/hosts (on_behalf_of); orquesta
+│   │                             # aprobación: 202+polling, /v1/approvals, /v1/sign/result
+│   │                             # NO custodia clave CA
 │   ├── broker-ctl/main.go        # CLI de gestión de signer.json
 │   │                             # host add/list/remove, reload (SIGHUP local o HTTP mTLS)
+│   │                             # approval list/allow/deny (mTLS al control plane)
 │   │                             # preserva campos _comment al editar el JSON
 │   └── broker/main.go            # frontend HTTP+mTLS alternativo (one-shot)
 ├── internal/
@@ -485,7 +491,20 @@ Roadmap estratégico para diferenciarse: el broker no solo gatea *acceso* sino *
 - Audit: campos `policy_rule`, `dry_run`; outcomes `dry_run_allowed`/`dry_run_denied`.
 - Config: `command_policy` por host. Modo remoto → `signer.json` (ver `web02` en `signer.example.json`). Modo local → `config.json` del broker (campo `command_policy` en `HostConfig`, mapeado en `policyFromHosts`; ver `web01` en `config.example.json`).
 
-**Pendiente Fase B** (`cmd/control-plane` + approval async polling) **y Fase C** (behavior + rate limiting). Rama: `feature/command-policy-dryrun`.
+**Fase B implementada (v1.6.0): control plane + aprobación humana.**
+- `cmd/control-plane/main.go` — PEP entre broker y signer. Reenvía `/v1/sign` y `/v1/hosts` al signer propagando la identidad del broker; orquesta aprobación. NO custodia la clave CA.
+- `internal/control/approval.go` — `Registry` (estado en memoria, TTL, `Consume` para una sola emisión por aprobación). `internal/control/notifier.go` — `Notifier` (log/webhook).
+- **Modelo de confianza**: `signer.json` gana `trusted_forwarders` (CN del control plane). El signer honra `on_behalf_of` (cuerpo en /v1/sign; cabecera `X-On-Behalf-Of` en /v1/hosts) y `approved` SOLO desde forwarders de confianza → la aprobación y la suplantación de identidad son inevadibles. `resolveCaller` en cmd/signer.
+- **Gate de aprobación en el signer** (autoritativo): `Local.SignIntent` no emite cert si `RequireApproval && !Approved` (devuelve Issued con cert nil + Decision). Un broker directo no puede auto-aprobarse.
+- **Flujo async** (sin conexiones colgadas): broker→control plane `POST /v1/sign` → si requiere aprobación, 202 `{approval_id}`; el broker hace polling `GET /v1/sign/result/{id}`; humano aprueba con `broker-ctl approval allow <id>` (`POST /v1/approvals/{id}`); siguiente poll reenvía con `approved=true` y devuelve el cert. `Remote.SetApprovalWait` + `signer.approval_wait_seconds`.
+- **broker-ctl approval** `list|allow|deny` (mTLS al control plane, cert aprobador).
+- Audit (control plane, log encadenado propio): `forwarded`/`approval-required`/`approval-granted`/`approval-denied`/`approval-timeout`/`approval-decision-allow`; campos `approval_id`/`approved_by`.
+- Config: `control-plane.example.json` (nuevo); `trusted_forwarders` en `signer.example.json`; broker apunta `signer.url` al control plane + `approval_wait_seconds` en `config.example.json`.
+- Tests: `internal/control/approval_test.go`, `cmd/control-plane/main_test.go` (flujo e2e de aprobación con signer stub), `cmd/signer/main_test.go` (`resolveCaller`/CN pinning), gate en `internal/signer/cmdpolicy_test.go`.
+
+**Pendiente Fase C** (behavior tracker + rate limiting en el control plane, observe→enforce). Rama Fase B: `feature/control-plane-approval`.
+
+**Pendiente operativo**: generar el cert del control plane (CN=`control-plane-1`) firmado por `pki/mtls_ca.crt` y añadirlo a `trusted_forwarders`. Lab e2e shell de aprobación (`lab/`) aún no escrito (cubierto por el test Go de integración).
 
 ### 13. Hardening de seguridad v1.4.1 (revisión MCP/Snyk)
 
@@ -681,9 +700,10 @@ git tag v1.1.0
 ## Archivos de configuración de referencia
 
 **`config.json`** — config activa del broker (modo remoto, rutas absolutas a `pki/`)
-**`config.example.json`** — referencia con modo local y remoto documentados; incluye `allow_sudo`/`allow_pty`
+**`config.example.json`** — referencia con modo local y remoto documentados; incluye `allow_sudo`/`allow_pty`/`command_policy` y `approval_wait_seconds`
 **`signer.json`** — config activa del signer (fuente de verdad única de hosts)
-**`signer.example.json`** — referencia con `allow_sudo`/`allowed_sudo_users`/`allow_pty`/`groups` por host + sección `callers`
+**`signer.example.json`** — referencia con `allow_sudo`/`allowed_sudo_users`/`allow_pty`/`groups`/`command_policy` por host + secciones `callers` y `trusted_forwarders`
+**`control-plane.example.json`** — referencia del control plane (cmd/control-plane): bloque `signer`, `approval` (notifier/callers/timeout), mTLS
 **`deploy/sshd_config.snippet`** — fragmento de `sshd_config` + sudoers NOPASSWD para hosts gestionados
 
 ---

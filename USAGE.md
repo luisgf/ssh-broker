@@ -193,6 +193,28 @@ restrict commands via an **allowlist** or **denylist** (see the README
 "AI-action firewall" section). Hosts with a command policy **do not allow
 sessions** — use `ssh_execute` on them.
 
+### 2.8 Commands that require human approval
+
+Some commands are configured to require **human approval** before they run
+(`require_approval` in the host policy). When you call `ssh_execute` for such a
+command, the tool **blocks** while a human is asked to approve out-of-band:
+
+```
+tool: ssh_execute
+params:
+  server:  "web01"
+  command: "systemctl restart nginx"
+```
+
+- If approved, the call returns normally (stdout / exit code) once the human
+  approves — this may take seconds to minutes.
+- If denied or it times out, the call returns an error explaining the command was
+  not approved. **Do not retry automatically**; surface the outcome to the user.
+
+You can check ahead of time whether a command needs approval with
+`dry_run: true` (the response says "requiere aprobación humana"). This lets you
+warn the user that the action will pause for approval before you run it.
+
 ---
 
 ## 3. ssh_session_open / exec / close — persistent session

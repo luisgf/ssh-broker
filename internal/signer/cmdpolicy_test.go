@@ -1,8 +1,12 @@
 package signer
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestCommandPolicyDecideAllowlist(t *testing.T) {
@@ -149,6 +153,72 @@ func TestResolveCommandRequireApprovalSurfaced(t *testing.T) {
 	}
 	if !d.RequireApproval {
 		t.Error("Decision.RequireApproval debe ser true")
+	}
+}
+
+// testCASigner crea un ssh.Signer para usar como CA en tests de emisión.
+func testCASigner(t *testing.T) ssh.Signer {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ssh.NewSignerFromKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// testEphemeralPub genera una pubkey efímera para la intención.
+func testEphemeralPub(t *testing.T) ssh.PublicKey {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sshPub
+}
+
+func TestSignIntentApprovalGate(t *testing.T) {
+	policy := PolicyTable{
+		"approval": {
+			Principal: "host:approval", MaxTTL: time.Minute,
+			CommandPolicy: CommandPolicy{RequireApproval: []string{`^reboot`}},
+		},
+	}
+	l := NewLocal(testCASigner(t), policy, time.Minute)
+	base := Intent{
+		Host: "approval", Role: RoleTarget, Purpose: PurposeOneshot,
+		Command: "reboot now", RequestedTTL: time.Minute, PublicKey: testEphemeralPub(t),
+	}
+
+	// Sin aprobación: requiere aprobación → no se emite certificado.
+	noApproval := base
+	issued, err := l.SignIntent(noApproval)
+	if err != nil {
+		t.Fatalf("no debe error, debe devolver decisión: %v", err)
+	}
+	if issued.Certificate != nil {
+		t.Error("sin aprobación no debe emitirse certificado")
+	}
+	if issued.Decision == nil || !issued.Decision.RequireApproval {
+		t.Errorf("decisión debe marcar require_approval: %+v", issued.Decision)
+	}
+
+	// Con aprobación: se emite el certificado.
+	approved := base
+	approved.Approved = true
+	issued2, err := l.SignIntent(approved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issued2.Certificate == nil {
+		t.Error("con aprobación debe emitirse certificado")
 	}
 }
 

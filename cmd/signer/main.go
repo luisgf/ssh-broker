@@ -52,6 +52,12 @@ type Config struct {
 	// SIGHUP sigue funcionando porque es local al host.
 	ReloadCallers []string `json:"reload_callers"`
 
+	// TrustedForwarders: CNs (de cert de cliente) autorizados a actuar en nombre
+	// de otro broker (campo on_behalf_of / cabecera X-On-Behalf-Of). Es el CN del
+	// control plane. Solo estos CNs pueden suplantar la identidad del broker para
+	// RBAC; cualquier otro que mande on_behalf_of es rechazado.
+	TrustedForwarders []string `json:"trusted_forwarders,omitempty"`
+
 	// Hosts: política de emisión + conectividad por host. Es la única fuente de
 	// verdad: el broker obtiene addr/user/host_key/jump vía GET /v1/hosts.
 	Hosts signer.PolicyTable `json:"hosts"`
@@ -96,12 +102,13 @@ func main() {
 	}
 
 	srv := &server{
-		local:    local,
-		audit:    auditLog,
-		hosts:    cfg.Hosts,
-		callers:  cfg.Callers,
-		reloadCN: reloadSet(cfg.ReloadCallers),
-		cfgPath:  *cfgPath,
+		local:      local,
+		audit:      auditLog,
+		hosts:      cfg.Hosts,
+		callers:    cfg.Callers,
+		reloadCN:   reloadSet(cfg.ReloadCallers),
+		forwarders: reloadSet(cfg.TrustedForwarders),
+		cfgPath:    *cfgPath,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/sign", srv.handleSign)
@@ -170,12 +177,13 @@ func reloadSet(cns []string) map[string]struct{} {
 }
 
 type server struct {
-	// mu protege el estado recargable en caliente (local, hosts, callers, reloadCN).
-	mu       sync.RWMutex
-	local    *signer.Local
-	hosts    signer.PolicyTable
-	callers  signer.CallerTable
-	reloadCN map[string]struct{}
+	// mu protege el estado recargable en caliente.
+	mu         sync.RWMutex
+	local      *signer.Local
+	hosts      signer.PolicyTable
+	callers    signer.CallerTable
+	reloadCN   map[string]struct{}
+	forwarders map[string]struct{}
 
 	// Inmutables tras el arranque.
 	audit   *audit.Log
@@ -184,10 +192,23 @@ type server struct {
 
 // snapshot devuelve el estado vigente bajo RLock, para que los handlers no lean
 // los campos mientras un reload los está sustituyendo.
-func (s *server) snapshot() (*signer.Local, signer.PolicyTable, signer.CallerTable) {
+func (s *server) snapshot() (*signer.Local, signer.PolicyTable, signer.CallerTable, map[string]struct{}) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.local, s.hosts, s.callers
+	return s.local, s.hosts, s.callers, s.forwarders
+}
+
+// resolveCaller determina la identidad efectiva para RBAC. Si onBehalfOf no es
+// vacío, solo se honra cuando mtlsCN es un forwarder de confianza; en otro caso
+// devuelve ok=false (la petición debe rechazarse con 403).
+func resolveCaller(mtlsCN, onBehalfOf string, forwarders map[string]struct{}) (caller string, ok bool) {
+	if onBehalfOf == "" {
+		return mtlsCN, true
+	}
+	if _, trusted := forwarders[mtlsCN]; trusted {
+		return onBehalfOf, true
+	}
+	return "", false
 }
 
 // reload relee el fichero de config y, si es válido, sustituye atómicamente el
@@ -207,6 +228,7 @@ func (s *server) reload() (int, error) {
 	s.hosts = cfg.Hosts
 	s.callers = cfg.Callers
 	s.reloadCN = reloadSet(cfg.ReloadCallers)
+	s.forwarders = reloadSet(cfg.TrustedForwarders)
 	s.mu.Unlock()
 	return len(cfg.Hosts), nil
 }
@@ -235,7 +257,20 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	local, hosts, callers := s.snapshot()
+	local, hosts, callers, forwarders := s.snapshot()
+
+	// approved solo se honra desde un forwarder de confianza (control plane); un
+	// broker no puede auto-aprobarse.
+	_, isForwarder := forwarders[caller]
+	effectiveApproved := req.Approved && isForwarder
+
+	// Resolver identidad efectiva: un forwarder de confianza (control plane) puede
+	// actuar en nombre del broker original vía on_behalf_of.
+	caller, ok := resolveCaller(caller, req.OnBehalfOf, forwarders)
+	if !ok {
+		http.Error(w, "on_behalf_of no permitido para este caller", http.StatusForbidden)
+		return
+	}
 
 	// Verificar acceso por grupo antes de Resolve: si el caller tiene restricción
 	// de grupo, el host solicitado debe pertenecer a alguno de sus grupos.
@@ -259,6 +294,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		SudoUser:      req.SudoUser,
 		PTY:           req.PTY,
 		DryRun:        req.DryRun,
+		Approved:      effectiveApproved,
 		EndUser:       req.EndUser,
 		EndUserGroups: req.EndUserGroups,
 	}
@@ -276,6 +312,16 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 			outcome = "dry_run_denied"
 		}
 		s.auditEmission(caller, req, hosts, 0, outcome, nil)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(signer.WireResponse{Decision: issued.Decision})
+		return
+	}
+
+	// Sin certificado pero permitido: la operación requiere aprobación humana y no
+	// ha sido aprobada. Se devuelve la decisión (cert vacío) para que el control
+	// plane orqueste la aprobación.
+	if issued.Certificate == nil {
+		s.auditEmission(caller, req, hosts, 0, "approval-required", nil)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(signer.WireResponse{Decision: issued.Decision})
 		return
@@ -307,7 +353,16 @@ func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, hosts, callers := s.snapshot()
+	_, hosts, callers, forwarders := s.snapshot()
+
+	// Un forwarder de confianza puede pedir la lista en nombre de un broker
+	// (cabecera X-On-Behalf-Of) para que el filtrado por grupos sea el del broker.
+	caller, ok := resolveCaller(caller, r.Header.Get(signer.HeaderOnBehalfOf), forwarders)
+	if !ok {
+		http.Error(w, "on_behalf_of no permitido para este caller", http.StatusForbidden)
+		return
+	}
+
 	result := make(map[string]signer.WireHostInfo, len(hosts))
 	for name, hp := range hosts {
 		result[name] = signer.WireHostInfo{

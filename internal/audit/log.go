@@ -48,6 +48,10 @@ type Entry struct {
 	PolicyRule string `json:"policy_rule,omitempty"` // regla de command_policy que casó
 	DryRun     bool   `json:"dry_run,omitempty"`     // true si fue una simulación (no se ejecutó)
 
+	// Aprobación humana (control plane).
+	ApprovalID string `json:"approval_id,omitempty"` // id de la solicitud de aprobación
+	ApprovedBy string `json:"approved_by,omitempty"` // CN del aprobador
+
 	// Campos de integridad (rellenados por Log.Append).
 	Seq      uint64 `json:"seq"`
 	PrevHash string `json:"prev_hash"`

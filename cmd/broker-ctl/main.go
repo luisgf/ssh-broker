@@ -49,6 +49,8 @@ func main() {
 		cmdHost(os.Args[2:])
 	case "reload":
 		cmdReload(os.Args[2:])
+	case "approval":
+		cmdApproval(os.Args[2:])
 	case "audit":
 		cmdAudit(os.Args[2:])
 	case "help", "--help", "-h":
@@ -68,6 +70,9 @@ Uso:
   broker-ctl host list   [--config f]              Lista hosts configurados
   broker-ctl host remove [--config f] <nombre>     Elimina un host
   broker-ctl reload      [--config f] [flags]      Recarga el signer
+  broker-ctl approval list  [flags]                Lista solicitudes de aprobación (control plane)
+  broker-ctl approval allow <id> [flags]           Aprueba una solicitud
+  broker-ctl approval deny  <id> [flags]           Deniega una solicitud
   broker-ctl audit tail   --log <f> [-n N]         Sigue el log de auditoría en tiempo real
   broker-ctl audit show   --log <f> [filtros]      Busca y filtra entradas del log
   broker-ctl audit verify --log <f> [--key seed]   Verifica la integridad de la cadena
@@ -345,6 +350,115 @@ func cmdReload(args []string) {
 		fatalf("signer rechazó recarga (HTTP %d): %s", resp.StatusCode, result.Error)
 	}
 	fmt.Printf("signer recargado vía HTTP (hosts: %d)\n", result.Hosts)
+}
+
+// ── approval (control plane) ────────────────────────────────────────────────────
+
+func cmdApproval(args []string) {
+	if len(args) < 1 {
+		fatalf("uso: broker-ctl approval <list|allow|deny> [id] [flags]")
+	}
+	switch args[0] {
+	case "list":
+		cmdApprovalList(args[1:])
+	case "allow", "approve":
+		cmdApprovalDecide(args[1:], true)
+	case "deny", "reject":
+		cmdApprovalDecide(args[1:], false)
+	default:
+		fatalf("subcomando de approval desconocido: %q (list|allow|deny)", args[0])
+	}
+}
+
+// approvalFlags registra los flags mTLS comunes hacia el control plane.
+func approvalFlags(fs *flag.FlagSet) (url, cert, key, ca *string) {
+	url = fs.String("url", "127.0.0.1:7443", "host:puerto del control plane")
+	cert = fs.String("cert", "./pki/broker-admin.crt", "cert cliente mTLS (aprobador)")
+	key = fs.String("key", "./pki/broker-admin.key", "clave cliente mTLS")
+	ca = fs.String("ca", "./pki/mtls_ca.crt", "CA mTLS")
+	return
+}
+
+func approvalClient(cert, key, ca string) *http.Client {
+	tlsCfg, err := buildTLSConfig(cert, key, ca)
+	if err != nil {
+		fatalf("TLS: %v", err)
+	}
+	return &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+}
+
+func cmdApprovalList(args []string) {
+	fs := flag.NewFlagSet("approval list", flag.ExitOnError)
+	url, cert, key, ca := approvalFlags(fs)
+	asJSON := fs.Bool("json", false, "salida JSON cruda")
+	must(fs.Parse(args))
+
+	client := approvalClient(*cert, *key, *ca)
+	resp, err := client.Get("https://" + *url + "/v1/approvals")
+	if err != nil {
+		fatalf("GET /v1/approvals: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fatalf("control plane devolvió %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
+	if *asJSON {
+		fmt.Println(string(body))
+		return
+	}
+	var items []struct {
+		ID        string `json:"id"`
+		Caller    string `json:"caller"`
+		EndUser   string `json:"end_user"`
+		Host      string `json:"host"`
+		Command   string `json:"command"`
+		Rule      string `json:"rule"`
+		Status    string `json:"status"`
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(body, &items); err != nil {
+		fatalf("parsear respuesta: %v", err)
+	}
+	if len(items) == 0 {
+		fmt.Println("(sin solicitudes)")
+		return
+	}
+	for _, it := range items {
+		user := it.EndUser
+		if user == "" {
+			user = "-"
+		}
+		fmt.Printf("%s  [%s]  caller=%s user=%s host=%s\n    cmd=%q rule=%s\n",
+			it.ID, it.Status, it.Caller, user, it.Host, it.Command, it.Rule)
+	}
+}
+
+func cmdApprovalDecide(args []string, approve bool) {
+	fs := flag.NewFlagSet("approval decide", flag.ExitOnError)
+	url, cert, key, ca := approvalFlags(fs)
+	must(fs.Parse(args))
+	if fs.NArg() < 1 {
+		fatalf("falta el id de la solicitud")
+	}
+	id := fs.Arg(0)
+
+	client := approvalClient(*cert, *key, *ca)
+	body, _ := json.Marshal(map[string]bool{"approve": approve})
+	resp, err := client.Post("https://"+*url+"/v1/approvals/"+id, "application/json", bytes.NewReader(body))
+	if err != nil {
+		fatalf("POST /v1/approvals/%s: %v", id, err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fatalf("control plane rechazó la decisión (HTTP %d): %s", resp.StatusCode, bytes.TrimSpace(rb))
+	}
+	verb := "denegada"
+	if approve {
+		verb = "aprobada"
+	}
+	fmt.Printf("solicitud %s %s\n", id, verb)
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────

@@ -58,6 +58,18 @@ type Intent struct {
 	// si un comando sería permitido / requeriría aprobación antes de ejecutarlo.
 	DryRun bool
 
+	// Approved indica que una operación que requiere aprobación humana ya fue
+	// aprobada. El signer solo lo honra si proviene de un forwarder de confianza
+	// (el control plane); un broker no puede auto-aprobarse. Hace que la aprobación
+	// sea inevadible: sin approved, un comando con require_approval no se emite.
+	Approved bool
+
+	// OnBehalfOf es el CN del broker en cuyo nombre actúa un forwarder de confianza
+	// (el control plane). El signer lo usa como Caller efectivo para RBAC SOLO si el
+	// CN mTLS real está en trusted_forwarders; en otro caso la petición se rechaza.
+	// Vacío en peticiones directas broker→signer (se usa el CN mTLS).
+	OnBehalfOf string
+
 	// EndUser es la identidad del usuario final que originó la petición (p. ej. el
 	// sub/preferred_username de un token OIDC en el frontend HTTP). Vacío cuando la
 	// petición no porta identidad de usuario (stdio local o frontend mTLS). Se usa
@@ -424,6 +436,13 @@ func (l *Local) SignIntent(in Intent) (*Issued, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Gate de aprobación: si la política exige aprobación humana y no se ha
+	// concedido, no se emite certificado. Se devuelve la decisión (cert nil) para
+	// que el control plane orqueste la aprobación. La aprobación es inevadible: un
+	// broker directo no puede poner Approved (solo forwarders de confianza).
+	if d.RequireApproval && !in.Approved {
+		return &Issued{Decision: decisionInfo(d, true)}, nil
 	}
 	cert, serial, err := ca.BuildAndSign(l.caKey, in.PublicKey, d.Constraints)
 	if err != nil {
