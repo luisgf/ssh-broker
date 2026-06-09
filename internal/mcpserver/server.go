@@ -6,16 +6,16 @@ import (
 	"github.com/luisgf/ssh-broker/internal/broker"
 )
 
-// Version es la versión anunciada por el servidor MCP a sus clientes.
+// Version is the version announced by the MCP server to its clients.
 const Version = "1.4.1"
 
-// New construye un *mcp.Server con las tools del broker registradas. callerFn
-// determina la identidad del llamante por petición (fija en stdio, derivada del
-// token OIDC en HTTP).
+// New builds a *mcp.Server with the broker tools registered. callerFn
+// determines the caller identity per request (fixed in stdio, derived from the
+// OIDC token in HTTP).
 func New(eng *broker.Engine, callerFn CallerFunc) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{
 		Name:    "ssh-broker",
-		Title:   "SSH Broker (CA efímera)",
+		Title:   "SSH Broker (ephemeral CA)",
 		Version: Version,
 	}, nil)
 	Register(srv, eng, callerFn)

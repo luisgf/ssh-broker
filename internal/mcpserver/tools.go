@@ -1,8 +1,8 @@
-// Package mcpserver registra las herramientas MCP del broker sobre un *mcp.Server,
-// de modo que tanto el frontend stdio (cmd/mcp-broker) como el frontend HTTP+OAuth
-// (cmd/mcp-broker-http) compartan exactamente la misma superficie de tools y la
-// misma lógica. La única diferencia entre frontends es cómo se obtiene la identidad
-// del llamante (callerFn), inyectada por dependencia.
+// Package mcpserver registers the broker's MCP tools on a *mcp.Server, so
+// that both the stdio frontend (cmd/mcp-broker) and the HTTP+OAuth frontend
+// (cmd/mcp-broker-http) share exactly the same tool surface and the same
+// logic. The only difference between frontends is how the caller identity is
+// obtained (callerFn), injected by dependency.
 package mcpserver
 
 import (
@@ -16,44 +16,44 @@ import (
 	"github.com/luisgf/ssh-broker/internal/signer"
 )
 
-// maxInputLen es el tamaño máximo de cualquier campo de texto de entrada MCP.
-// L4: evita que inputs malformados lleguen al engine sin un filtro previo.
+// maxInputLen is the maximum size of any MCP text input field.
+// L4: prevents malformed inputs from reaching the engine without a prior filter.
 const maxInputLen = 64 * 1024 // 64 KiB
 
-// validateInput comprueba que todos los campos no superen el límite de longitud
-// y no contengan bytes nulos (que podrían causar comportamientos inesperados
-// en el shell o en los logs).
+// validateInput checks that all fields do not exceed the length limit and do
+// not contain null bytes (which could cause unexpected behaviour in the shell
+// or in logs).
 func validateInput(fields map[string]string) error {
 	for name, val := range fields {
 		if len(val) > maxInputLen {
-			return fmt.Errorf("campo %q excede el límite de %d bytes", name, maxInputLen)
+			return fmt.Errorf("field %q exceeds the limit of %d bytes", name, maxInputLen)
 		}
 		if strings.ContainsRune(val, 0) {
-			return fmt.Errorf("campo %q contiene bytes nulos", name)
+			return fmt.Errorf("field %q contains null bytes", name)
 		}
 	}
 	return nil
 }
 
-// CallerFunc deriva la identidad del llamante a partir del contexto de la petición.
-// En stdio devuelve una identidad fija; en HTTP la extrae del token validado.
+// CallerFunc derives the caller identity from the request context. In stdio it
+// returns a fixed identity; in HTTP it extracts it from the validated token.
 type CallerFunc func(context.Context) broker.Caller
 
 type executeInput struct {
-	Server     string `json:"server"               jsonschema:"nombre lógico del host destino (ver ssh_list_servers)"`
-	Command    string `json:"command"              jsonschema:"comando a ejecutar en el host"`
-	TTLSeconds int    `json:"ttl_seconds,omitempty" jsonschema:"validez del certificado efímero en segundos; omitir para usar el máximo permitido por la política del host"`
-	Sudo       bool   `json:"sudo,omitempty"       jsonschema:"si true ejecuta con sudo -n (NOPASSWD). Requiere allow_sudo=true en ssh_list_servers. Si allow_sudo=false NO reintentes: informa al usuario de que el host no permite elevación."`
-	SudoUser   string `json:"sudo_user,omitempty"  jsonschema:"usuario destino del sudo (vacío = root). Debe estar en la lista allowed_sudo_users del host."`
-	PTY        bool   `json:"pty,omitempty"        jsonschema:"si true solicita un pseudo-terminal (stdout y stderr se mezclan). Requiere allow_pty=true en ssh_list_servers. Usar solo para comandos que necesitan TTY. Si allow_pty=false NO reintentes."`
-	DryRun     bool   `json:"dry_run,omitempty"    jsonschema:"si true SIMULA: comprueba si el comando sería permitido por la política del host (allow/deny y si requiere aprobación) SIN ejecutarlo. No conecta al host ni produce stdout. Útil para previsualizar antes de ejecutar."`
+	Server     string `json:"server"                jsonschema:"logical name of the target host (see ssh_list_servers)"`
+	Command    string `json:"command"               jsonschema:"command to execute on the host"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty" jsonschema:"ephemeral certificate validity in seconds; omit to use the maximum allowed by the host policy"`
+	Sudo       bool   `json:"sudo,omitempty"        jsonschema:"if true, execute with sudo -n (NOPASSWD). Requires allow_sudo=true in ssh_list_servers. If allow_sudo=false DO NOT retry: inform the user that the host does not allow elevation."`
+	SudoUser   string `json:"sudo_user,omitempty"   jsonschema:"target user for sudo (empty = root). Must be in the host's allowed_sudo_users list."`
+	PTY        bool   `json:"pty,omitempty"         jsonschema:"if true, request a pseudo-terminal (stdout and stderr are merged). Requires allow_pty=true in ssh_list_servers. Use only for commands that need a TTY. If allow_pty=false DO NOT retry."`
+	DryRun     bool   `json:"dry_run,omitempty"     jsonschema:"if true, SIMULATE: check whether the command would be allowed by the host policy (allow/deny and whether it requires approval) WITHOUT executing it. Does not connect to the host or produce stdout. Useful to preview before executing."`
 }
 
 type executeOutput struct {
-	Stdout   string `json:"stdout"    jsonschema:"salida estándar del comando remoto"`
-	Stderr   string `json:"stderr"    jsonschema:"salida de error del comando remoto (vacío si se usó pty=true, ya que stdout y stderr se mezclan)"`
-	ExitCode int    `json:"exit_code" jsonschema:"código de salida del comando remoto: 0=éxito, distinto de 0=fallo del comando (NO es un error de la tool)"`
-	Serial   uint64 `json:"serial"    jsonschema:"identificador de auditoría; ignorar para razonar sobre el resultado"`
+	Stdout   string `json:"stdout"    jsonschema:"standard output of the remote command"`
+	Stderr   string `json:"stderr"    jsonschema:"error output of the remote command (empty when pty=true, since stdout and stderr are merged)"`
+	ExitCode int    `json:"exit_code" jsonschema:"exit code of the remote command: 0=success, non-zero=command failure (NOT a tool error)"`
+	Serial   uint64 `json:"serial"    jsonschema:"audit identifier; ignore when reasoning about the result"`
 }
 
 type listInput struct{}
@@ -70,20 +70,20 @@ type listOutput struct {
 }
 
 type sessionOpenInput struct {
-	Server     string `json:"server"               jsonschema:"nombre lógico del host destino (ver ssh_list_servers)"`
-	Mode       string `json:"mode,omitempty"       jsonschema:"exec (por defecto): comandos aislados sin estado compartido. shell: sh persistente, cd y variables de entorno sobreviven entre ssh_session_exec. pty: shell con pseudo-terminal para programas interactivos (editores, less, etc.); requiere allow_pty=true. Si allow_pty=false NO uses pty."`
-	TTLSeconds int    `json:"ttl_seconds,omitempty" jsonschema:"validez del certificado de conexión en segundos; omitir para usar el máximo permitido por la política del host"`
-	Sudo       bool   `json:"sudo,omitempty"       jsonschema:"si true arranca con elevación sudo -n (NOPASSWD). En mode=shell/pty eleva el proceso shell completo. En mode=exec antepone sudo a cada comando individual. Requiere allow_sudo=true en ssh_list_servers. Si allow_sudo=false NO reintentes."`
-	SudoUser   string `json:"sudo_user,omitempty"  jsonschema:"usuario destino del sudo (vacío = root). Debe estar en la lista allowed_sudo_users del host."`
+	Server     string `json:"server"                jsonschema:"logical name of the target host (see ssh_list_servers)"`
+	Mode       string `json:"mode,omitempty"        jsonschema:"exec (default): isolated commands with no shared state. shell: persistent sh, cd and environment variables survive across ssh_session_exec calls. pty: shell with pseudo-terminal for interactive programs (editors, less, etc.); requires allow_pty=true. If allow_pty=false DO NOT use pty."`
+	TTLSeconds int    `json:"ttl_seconds,omitempty" jsonschema:"connection certificate validity in seconds; omit to use the maximum allowed by the host policy"`
+	Sudo       bool   `json:"sudo,omitempty"        jsonschema:"if true, start with sudo -n elevation (NOPASSWD). In mode=shell/pty elevates the whole shell process. In mode=exec prepends sudo to each individual command. Requires allow_sudo=true in ssh_list_servers. If allow_sudo=false DO NOT retry."`
+	SudoUser   string `json:"sudo_user,omitempty"   jsonschema:"target user for sudo (empty = root). Must be in the host's allowed_sudo_users list."`
 }
 
 type sessionExecInput struct {
-	SessionID string `json:"session_id" jsonschema:"id devuelto por ssh_session_open"`
-	Command   string `json:"command"    jsonschema:"comando a ejecutar en la sesión"`
+	SessionID string `json:"session_id" jsonschema:"id returned by ssh_session_open"`
+	Command   string `json:"command"    jsonschema:"command to execute in the session"`
 }
 
 type sessionCloseInput struct {
-	SessionID string `json:"session_id" jsonschema:"id de la sesión a cerrar"`
+	SessionID string `json:"session_id" jsonschema:"id of the session to close"`
 }
 
 type okOutput struct {
@@ -95,19 +95,19 @@ type sessionOpenOutput struct {
 	Serial    uint64 `json:"serial"`
 }
 
-// Register añade las 5 tools del broker al servidor MCP. callerFn provee la
-// identidad del llamante para cada invocación (auditoría y RBAC del signer).
+// Register adds the 5 broker tools to the MCP server. callerFn provides the
+// caller identity for each invocation (audit and signer RBAC).
 func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "ssh_execute",
-		Description: "Ejecuta un único comando en un host Linux vía SSH con credencial efímera. " +
-			"Preferir esta tool frente a ssh_session_open cuando solo se necesita ejecutar un comando o comandos independientes entre sí. " +
-			"Devuelve stdout, stderr y exit_code. " +
-			"exit_code != 0 indica fallo del comando remoto, NO un error de la tool; tratar igual que un proceso que termina con error. " +
-			"ANTES de llamar: usar ssh_list_servers para conocer las capacidades del host. " +
-			"sudo=true SOLO si allow_sudo=true; si allow_sudo=false, NO reintentar con sudo e informar al usuario. " +
-			"pty=true SOLO si allow_pty=true y el comando necesita TTY (con pty stdout y stderr se mezclan). " +
-			"ttl_seconds es opcional; omitir para usar el máximo que permita la política del host.",
+		Description: "Execute a single command on a Linux host via SSH with an ephemeral credential. " +
+			"Prefer this tool over ssh_session_open when you only need to run one command or independent commands. " +
+			"Returns stdout, stderr and exit_code. " +
+			"exit_code != 0 means remote command failure, NOT a tool error; treat it like a process that exits with an error. " +
+			"BEFORE calling: use ssh_list_servers to learn the host capabilities. " +
+			"sudo=true ONLY if allow_sudo=true; if allow_sudo=false, DO NOT retry with sudo and inform the user. " +
+			"pty=true ONLY if allow_pty=true and the command needs a TTY (with pty, stdout and stderr are merged). " +
+			"ttl_seconds is optional; omit to use the maximum allowed by the host policy.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in executeInput) (*mcp.CallToolResult, executeOutput, error) {
 		if err := validateInput(map[string]string{"server": in.Server, "command": in.Command, "sudo_user": in.SudoUser}); err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, executeOutput{}, nil
@@ -120,7 +120,7 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 				Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
 			}, executeOutput{}, nil
 		}
-		// Dry-run: devolver la decisión de política en lugar de salida ejecutada.
+		// Dry-run: return the policy decision instead of executed output.
 		if res.DryRun != nil {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: renderDecision(res.DryRun)}}}, executeOutput{}, nil
 		}
@@ -130,14 +130,14 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "ssh_list_servers",
-		Description: "Lista los hosts configurados en el broker con sus capacidades. " +
-			"Llamar SIEMPRE antes de ssh_execute o ssh_session_open. " +
-			"Campos por host: " +
-			"allow_sudo=true → el host acepta elevación sudo NOPASSWD (se puede usar sudo=true); " +
-			"allow_sudo=false → NO intentar sudo, el signer lo rechazará. " +
-			"allow_pty=true → el host acepta PTY (se puede usar pty=true o mode=pty); " +
-			"allow_pty=false → NO intentar PTY. " +
-			"jump → nombre del bastión por el que se alcanza el host (informativo).",
+		Description: "List the hosts configured in the broker with their capabilities. " +
+			"ALWAYS call before ssh_execute or ssh_session_open. " +
+			"Fields per host: " +
+			"allow_sudo=true → the host accepts NOPASSWD sudo elevation (sudo=true may be used); " +
+			"allow_sudo=false → DO NOT attempt sudo, the signer will reject it. " +
+			"allow_pty=true → the host accepts PTY (pty=true or mode=pty may be used); " +
+			"allow_pty=false → DO NOT attempt PTY. " +
+			"jump → name of the bastion through which the host is reached (informational).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ listInput) (*mcp.CallToolResult, listOutput, error) {
 		infos := eng.ServerInfos()
 		entries := make([]serverEntry, len(infos))
@@ -156,14 +156,14 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "ssh_session_open",
-		Description: "Abre una sesión SSH persistente que reutiliza la conexión entre comandos. " +
-			"Usar cuando se necesiten varios comandos con estado compartido (ej. cd a un directorio y luego operar en él) o programas interactivos. " +
-			"Para comandos aislados preferir ssh_execute (más simple y con mayor garantía de aislamiento). " +
-			"Modos disponibles: exec (por defecto, comandos independientes), shell (sh con estado: cd y variables persisten), pty (shell con TTY para programas interactivos). " +
-			"sudo=true SOLO si allow_sudo=true (ver ssh_list_servers); si allow_sudo=false NO reintentar. " +
-			"mode=pty SOLO si allow_pty=true. " +
-			"Devuelve session_id para usar con ssh_session_exec. " +
-			"IMPORTANTE: cerrar siempre la sesión con ssh_session_close al terminar; las sesiones consumen recursos y expiran por TTL.",
+		Description: "Open a persistent SSH session that reuses the connection across commands. " +
+			"Use when you need multiple commands with shared state (e.g. cd to a directory and then operate in it) or interactive programs. " +
+			"For isolated commands prefer ssh_execute (simpler, stronger isolation guarantee). " +
+			"Available modes: exec (default, independent commands), shell (stateful sh: cd and variables persist), pty (shell with TTY for interactive programs). " +
+			"sudo=true ONLY if allow_sudo=true (see ssh_list_servers); if allow_sudo=false DO NOT retry. " +
+			"mode=pty ONLY if allow_pty=true. " +
+			"Returns session_id for use with ssh_session_exec. " +
+			"IMPORTANT: always close the session with ssh_session_close when done; sessions consume resources and expire by TTL.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in sessionOpenInput) (*mcp.CallToolResult, sessionOpenOutput, error) {
 		if err := validateInput(map[string]string{"server": in.Server, "mode": in.Mode, "sudo_user": in.SudoUser}); err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, sessionOpenOutput{}, nil
@@ -179,10 +179,10 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "ssh_session_exec",
-		Description: "Ejecuta un comando en una sesión abierta con ssh_session_open. " +
-			"Devuelve stdout, stderr y exit_code. " +
-			"exit_code != 0 indica fallo del comando remoto, NO un error de la tool. " +
-			"El estado de la sesión (directorio actual, variables de entorno) persiste entre llamadas si mode=shell o mode=pty.",
+		Description: "Execute a command in a session opened with ssh_session_open. " +
+			"Returns stdout, stderr and exit_code. " +
+			"exit_code != 0 means remote command failure, NOT a tool error. " +
+			"Session state (current directory, environment variables) persists across calls when mode=shell or mode=pty.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in sessionExecInput) (*mcp.CallToolResult, executeOutput, error) {
 		if err := validateInput(map[string]string{"session_id": in.SessionID, "command": in.Command}); err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, executeOutput{}, nil
@@ -197,8 +197,8 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "ssh_session_close",
-		Description: "Cierra una sesión SSH persistente y libera la conexión. " +
-			"Llamar siempre al terminar de trabajar con una sesión; no cerrarla consume recursos hasta que expira el TTL del certificado.",
+		Description: "Close a persistent SSH session and release the connection. " +
+			"Always call when done working with a session; leaving it open consumes resources until the certificate TTL expires.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in sessionCloseInput) (*mcp.CallToolResult, okOutput, error) {
 		if err := validateInput(map[string]string{"session_id": in.SessionID}); err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, okOutput{}, nil
@@ -206,26 +206,26 @@ func Register(srv *mcp.Server, eng *broker.Engine, callerFn CallerFunc) {
 		if err := eng.CloseSession(callerFn(ctx), in.SessionID); err != nil {
 			return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}}}, okOutput{}, nil
 		}
-		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "cerrada"}}}, okOutput{OK: true}, nil
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "closed"}}}, okOutput{OK: true}, nil
 	})
 }
 
-// renderDecision formatea el resultado de un dry-run (simulación de política).
+// renderDecision formats the result of a dry-run (policy simulation).
 func renderDecision(d *signer.DecisionInfo) string {
 	var b strings.Builder
 	if d.Allowed {
-		b.WriteString("[dry-run] PERMITIDO")
+		b.WriteString("[dry-run] ALLOWED")
 		if d.RequireApproval {
-			b.WriteString(" (requiere aprobación humana antes de ejecutar)")
+			b.WriteString(" (requires human approval before executing)")
 		}
 	} else {
-		b.WriteString("[dry-run] DENEGADO")
+		b.WriteString("[dry-run] DENIED")
 		if d.Reason != "" {
 			fmt.Fprintf(&b, ": %s", d.Reason)
 		}
 	}
 	if d.MatchedRule != "" {
-		fmt.Fprintf(&b, "\nregla: %s", d.MatchedRule)
+		fmt.Fprintf(&b, "\nrule: %s", d.MatchedRule)
 	}
 	if d.ForceCommand != "" {
 		fmt.Fprintf(&b, "\nforce-command: %s", d.ForceCommand)

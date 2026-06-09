@@ -1,11 +1,11 @@
-// Package control — TeamsNotifier envía una notificación de aprobación pendiente
-// a un canal de Microsoft Teams a través de un Incoming Webhook o un Workflow de
-// Power Automate, formateando el payload como una Adaptive Card (formato "workflow"
-// o "adaptivecard", recomendado y a prueba de futuro) o como una MessageCard legacy
-// (formato "messagecard", para tenants que aún usen M365 Connectors clásicos).
+// Package control — TeamsNotifier sends a pending-approval notification to a
+// Microsoft Teams channel via an Incoming Webhook or a Power Automate Workflow,
+// formatting the payload as an Adaptive Card (format "workflow" / "adaptivecard",
+// recommended and forward-compatible) or as a legacy MessageCard (format
+// "messagecard", for tenants still using classic M365 Connectors).
 //
-// Seguridad: el payload solo contiene campos públicos del struct Approval. El campo
-// privado req (que guarda la pubkey efímera) nunca se serializa.
+// Security: the payload contains only public fields of the Approval struct. The
+// private req field (which holds the ephemeral public key) is never serialised.
 package control
 
 import (
@@ -18,40 +18,39 @@ import (
 	"time"
 )
 
-// Formatos soportados por TeamsNotifier.
+// Formats supported by TeamsNotifier.
 const (
-	// TeamsFormatWorkflow es el formato Adaptive Card envuelta en el sobre de mensaje
-	// requerido por Power Automate Workflows / Incoming Webhooks modernos.
-	// Es el formato recomendado por Microsoft y el default.
+	// TeamsFormatWorkflow is the Adaptive Card wrapped in the message envelope
+	// required by Power Automate Workflows / modern Incoming Webhooks.
+	// This is the Microsoft-recommended format and the default.
 	TeamsFormatWorkflow = "workflow"
 
-	// TeamsFormatAdaptiveCard es un alias de TeamsFormatWorkflow.
+	// TeamsFormatAdaptiveCard is an alias for TeamsFormatWorkflow.
 	TeamsFormatAdaptiveCard = "adaptivecard"
 
-	// TeamsFormatMessageCard usa el formato MessageCard legacy de M365 Connectors.
-	// Microsoft está retirando este mecanismo; úsalo solo si tu tenant no soporta
-	// el formato Workflow todavía.
+	// TeamsFormatMessageCard uses the legacy MessageCard format for M365
+	// Connectors. Microsoft is retiring this mechanism; use it only when your
+	// tenant does not yet support the Workflow format.
 	TeamsFormatMessageCard = "messagecard"
 )
 
-// TeamsNotifier implementa Notifier enviando la notificación de aprobación a un
-// canal de Microsoft Teams a través de un webhook.
+// TeamsNotifier implements Notifier by sending the approval notification to a
+// Microsoft Teams channel via a webhook.
 type TeamsNotifier struct {
 	url                 string
 	format              string // TeamsFormatWorkflow | TeamsFormatMessageCard
-	approvalURLTemplate string // opcional; "{id}" se sustituye por el ID de la solicitud
+	approvalURLTemplate string // optional; "{id}" is replaced with the request ID
 	client              *http.Client
 }
 
-// NewTeamsNotifier crea un notificador para Teams.
+// NewTeamsNotifier creates a Teams notifier.
 //
-//   - url: URL del Incoming Webhook (Power Automate Workflow o M365 Connector).
-//   - format: "workflow" / "adaptivecard" (recomendado) o "messagecard" (legacy).
-//     Cadena vacía → "workflow".
-//   - approvalURLTemplate: URL opcional que se incrusta en la card como enlace
-//     "View request". Use "{id}" como marcador del approval ID (p. ej.
-//     "https://approvals.example.com/requests/{id}"). Si está vacío, no se
-//     añade ningún enlace.
+//   - url: Incoming Webhook URL (Power Automate Workflow or M365 Connector).
+//   - format: "workflow" / "adaptivecard" (recommended) or "messagecard" (legacy).
+//     Empty string → "workflow".
+//   - approvalURLTemplate: optional URL embedded in the card as a "View request"
+//     link. Use "{id}" as a placeholder for the approval ID (e.g.
+//     "https://approvals.example.com/requests/{id}"). Empty = no link.
 func NewTeamsNotifier(url, format, approvalURLTemplate string) *TeamsNotifier {
 	if format == "" || format == TeamsFormatAdaptiveCard {
 		format = TeamsFormatWorkflow
@@ -64,8 +63,8 @@ func NewTeamsNotifier(url, format, approvalURLTemplate string) *TeamsNotifier {
 	}
 }
 
-// Notify implementa Notifier. Construye el payload según el formato configurado
-// y lo envía por HTTP POST al webhook de Teams.
+// Notify implements Notifier. Builds the payload according to the configured
+// format and sends it via HTTP POST to the Teams webhook.
 func (t *TeamsNotifier) Notify(a Approval) error {
 	var payload any
 	switch t.format {
@@ -77,7 +76,7 @@ func (t *TeamsNotifier) Notify(a Approval) error {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("teams notifier: serializar payload: %w", err)
+		return fmt.Errorf("teams notifier: serialising payload: %w", err)
 	}
 	resp, err := t.client.Post(t.url, "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -86,13 +85,13 @@ func (t *TeamsNotifier) Notify(a Approval) error {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("teams notifier: webhook devolvió HTTP %d", resp.StatusCode)
+		return fmt.Errorf("teams notifier: webhook returned HTTP %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// renderURL sustituye "{id}" en el template por el ID de la solicitud.
-// Devuelve cadena vacía si el template está vacío.
+// renderURL substitutes "{id}" in the template with the request ID.
+// Returns an empty string when the template is empty.
 func (t *TeamsNotifier) renderURL(id string) string {
 	if t.approvalURLTemplate == "" {
 		return ""
@@ -100,11 +99,11 @@ func (t *TeamsNotifier) renderURL(id string) string {
 	return strings.ReplaceAll(t.approvalURLTemplate, "{id}", id)
 }
 
-// ── Adaptive Card (formato workflow) ─────────────────────────────────────────
+// ── Adaptive Card (workflow format) ──────────────────────────────────────────
 
-// buildWorkflowEnvelope construye el sobre de mensaje que exige el trigger
-// "When a Teams webhook request is received" de Power Automate, envolviendo
-// una Adaptive Card v1.4.
+// buildWorkflowEnvelope constructs the message envelope required by the Power
+// Automate "When a Teams webhook request is received" trigger, wrapping an
+// Adaptive Card v1.4.
 func (t *TeamsNotifier) buildWorkflowEnvelope(a Approval) map[string]any {
 	return map[string]any{
 		"type": "message",
@@ -118,11 +117,11 @@ func (t *TeamsNotifier) buildWorkflowEnvelope(a Approval) map[string]any {
 	}
 }
 
-// buildAdaptiveCard construye el objeto de Adaptive Card v1.4.
+// buildAdaptiveCard constructs the Adaptive Card v1.4 object.
 func (t *TeamsNotifier) buildAdaptiveCard(a Approval) map[string]any {
 	facts := t.approvalFacts(a)
 
-	// Cuerpo de la card: título + descripción + FactSet.
+	// Card body: title + description + FactSet.
 	body := []map[string]any{
 		{
 			"type":   "TextBlock",
@@ -150,7 +149,7 @@ func (t *TeamsNotifier) buildAdaptiveCard(a Approval) map[string]any {
 		"body":    body,
 	}
 
-	// Añadir botón "View request" solo si hay template configurado.
+	// Add "View request" button only when a template is configured.
 	if approvalURL := t.renderURL(a.ID); approvalURL != "" {
 		card["actions"] = []map[string]any{
 			{
@@ -164,14 +163,12 @@ func (t *TeamsNotifier) buildAdaptiveCard(a Approval) map[string]any {
 	return card
 }
 
-// ── MessageCard (formato legacy) ─────────────────────────────────────────────
+// ── MessageCard (legacy format) ───────────────────────────────────────────────
 
-// buildMessageCard construye el payload MessageCard para M365 Connectors legacy.
+// buildMessageCard constructs the MessageCard payload for legacy M365 Connectors.
 func (t *TeamsNotifier) buildMessageCard(a Approval) map[string]any {
 	facts := t.approvalFacts(a)
 
-	// Convertir []{"name":…,"value":…} a []{"name":…,"value":…} (mismo formato;
-	// los facts de MessageCard y FactSet de Adaptive Card comparten estructura).
 	card := map[string]any{
 		"@type":      "MessageCard",
 		"@context":   "http://schema.org/extensions",
@@ -187,7 +184,7 @@ func (t *TeamsNotifier) buildMessageCard(a Approval) map[string]any {
 		},
 	}
 
-	// Añadir acción "View request" solo si hay template configurado.
+	// Add "View request" action only when a template is configured.
 	if approvalURL := t.renderURL(a.ID); approvalURL != "" {
 		card["potentialAction"] = []map[string]any{
 			{
@@ -203,10 +200,10 @@ func (t *TeamsNotifier) buildMessageCard(a Approval) map[string]any {
 	return card
 }
 
-// ── Helpers compartidos ───────────────────────────────────────────────────────
+// ── Shared helpers ────────────────────────────────────────────────────────────
 
-// approvalFacts construye la lista de facts (pares nombre/valor) comunes a
-// Adaptive Card y MessageCard, mostrando solo los campos con valor.
+// approvalFacts builds the list of facts (name/value pairs) shared by Adaptive
+// Card and MessageCard, including only non-empty fields.
 func (t *TeamsNotifier) approvalFacts(a Approval) []map[string]any {
 	type kv struct{ k, v string }
 	raw := []kv{

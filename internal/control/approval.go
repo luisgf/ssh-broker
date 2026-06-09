@@ -1,8 +1,8 @@
-// Package control implementa el control plane: un Policy Enforcement Point que se
-// sitúa entre el broker y el signer. Orquesta la aprobación humana de comandos
-// (human-in-the-loop) y los guardrails de comportamiento, SIN custodiar la clave
-// de CA (que permanece en el signer). El signer aplica la política autoritativa;
-// el control plane decide cuándo una operación necesita aprobación y la gestiona.
+// Package control implements the control plane: a Policy Enforcement Point that
+// sits between the broker and the signer. It orchestrates human approval for
+// commands (human-in-the-loop) and behaviour guardrails, WITHOUT holding the CA
+// key (which remains in the signer). The signer enforces authoritative policy;
+// the control plane decides when an operation needs approval and manages it.
 package control
 
 import (
@@ -15,7 +15,7 @@ import (
 	"github.com/luisgf/ssh-broker/internal/signer"
 )
 
-// Status es el estado de una solicitud de aprobación.
+// Status is the state of an approval request.
 type Status string
 
 const (
@@ -25,37 +25,37 @@ const (
 	StatusExpired  Status = "expired"
 )
 
-// Approval es una solicitud de aprobación humana para una operación que la
-// command policy marcó como require_approval.
+// Approval is a human-approval request for an operation that the command
+// policy flagged as require_approval.
 type Approval struct {
 	ID        string    `json:"id"`
-	Caller    string    `json:"caller"`             // CN del broker que originó la petición
-	EndUser   string    `json:"end_user,omitempty"` // identidad OIDC del usuario final
+	Caller    string    `json:"caller"`             // CN of the broker that originated the request
+	EndUser   string    `json:"end_user,omitempty"` // OIDC identity of the end user
 	Host      string    `json:"host"`
 	Command   string    `json:"command"`
 	Sudo      bool      `json:"sudo,omitempty"`
 	SudoUser  string    `json:"sudo_user,omitempty"`
-	Rule      string    `json:"rule,omitempty"` // regla require_approval que casó
+	Rule      string    `json:"rule,omitempty"` // require_approval rule that matched
 	Status    Status    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 	DecidedBy string    `json:"decided_by,omitempty"`
 	DecidedAt time.Time `json:"decided_at,omitempty"`
 
-	// req es la petición original a reenviar al signer una vez aprobada. No se
-	// serializa hacia el exterior (contiene la pubkey efímera).
+	// req is the original request to forward to the signer once approved. Not
+	// serialised externally (contains the ephemeral public key).
 	req signer.WireRequest
-	// consumed evita que una única aprobación emita más de un certificado.
+	// consumed prevents a single approval from issuing more than one certificate.
 	consumed bool
 }
 
-// Registry mantiene las solicitudes de aprobación en memoria con expiración por TTL.
+// Registry keeps approval requests in memory with TTL-based expiry.
 type Registry struct {
 	mu    sync.Mutex
 	items map[string]*Approval
 	ttl   time.Duration
 }
 
-// NewRegistry crea un registro con el TTL dado para las solicitudes pendientes.
+// NewRegistry creates a registry with the given TTL for pending requests.
 func NewRegistry(ttl time.Duration) *Registry {
 	if ttl <= 0 {
 		ttl = 2 * time.Minute
@@ -63,8 +63,8 @@ func NewRegistry(ttl time.Duration) *Registry {
 	return &Registry{items: make(map[string]*Approval), ttl: ttl}
 }
 
-// Create registra una nueva solicitud pendiente a partir de la petición y la
-// decisión de política. Devuelve la solicitud creada (con ID asignado).
+// Create registers a new pending request from the wire request and policy
+// decision. Returns the created approval (with an assigned ID).
 func (r *Registry) Create(req signer.WireRequest, caller string, dec *signer.DecisionInfo) (*Approval, error) {
 	id, err := newID()
 	if err != nil {
@@ -91,7 +91,7 @@ func (r *Registry) Create(req signer.WireRequest, caller string, dec *signer.Dec
 	return a, nil
 }
 
-// Get devuelve una copia de la solicitud, aplicando expiración perezosa.
+// Get returns a copy of the request, applying lazy expiry.
 func (r *Registry) Get(id string) (Approval, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -103,7 +103,8 @@ func (r *Registry) Get(id string) (Approval, bool) {
 	return *a, true
 }
 
-// Request devuelve la WireRequest original (para reenviar al signer tras aprobar).
+// Request returns the original WireRequest (to forward to the signer after
+// approval).
 func (r *Registry) Request(id string) (signer.WireRequest, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -114,18 +115,18 @@ func (r *Registry) Request(id string) (signer.WireRequest, bool) {
 	return a.req, true
 }
 
-// Decide resuelve una solicitud pendiente como aprobada o denegada. Falla si la
-// solicitud no existe o ya no está pendiente (expirada/resuelta).
+// Decide resolves a pending request as approved or denied. Fails if the
+// request does not exist or is no longer pending (expired/resolved).
 func (r *Registry) Decide(id string, approve bool, by string) (Approval, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	a, ok := r.items[id]
 	if !ok {
-		return Approval{}, fmt.Errorf("solicitud de aprobación desconocida: %q", id)
+		return Approval{}, fmt.Errorf("unknown approval request: %q", id)
 	}
 	r.expireLocked(a)
 	if a.Status != StatusPending {
-		return *a, fmt.Errorf("la solicitud %q ya no está pendiente (estado: %s)", id, a.Status)
+		return *a, fmt.Errorf("request %q is no longer pending (status: %s)", id, a.Status)
 	}
 	if approve {
 		a.Status = StatusApproved
@@ -137,9 +138,9 @@ func (r *Registry) Decide(id string, approve bool, by string) (Approval, error) 
 	return *a, nil
 }
 
-// Consume marca una solicitud aprobada como ya emitida. Devuelve true solo la
-// primera vez (estado aprobado y no consumida); en otro caso false. Evita que una
-// sola aprobación se reutilice para emitir varios certificados.
+// Consume marks an approved request as already issued. Returns true only the
+// first time (approved and not yet consumed); otherwise false. Prevents a
+// single approval from being reused to issue multiple certificates.
 func (r *Registry) Consume(id string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -155,7 +156,7 @@ func (r *Registry) Consume(id string) bool {
 	return true
 }
 
-// List devuelve una copia de todas las solicitudes (aplicando expiración).
+// List returns a copy of all requests (applying expiry).
 func (r *Registry) List() []Approval {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -167,19 +168,19 @@ func (r *Registry) List() []Approval {
 	return out
 }
 
-// expireLocked marca como expirada una solicitud pendiente cuyo TTL ha vencido.
-// Debe llamarse con r.mu retenido.
+// expireLocked marks a pending request as expired when its TTL has elapsed.
+// Must be called with r.mu held.
 func (r *Registry) expireLocked(a *Approval) {
 	if a.Status == StatusPending && time.Since(a.CreatedAt) > r.ttl {
 		a.Status = StatusExpired
 	}
 }
 
-// newID genera un identificador hexadecimal aleatorio de 128 bits.
+// newID generates a random 128-bit hexadecimal identifier.
 func newID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generar id de aprobación: %w", err)
+		return "", fmt.Errorf("generating approval id: %w", err)
 	}
 	return hex.EncodeToString(b), nil
 }

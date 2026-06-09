@@ -6,25 +6,25 @@ import (
 	"time"
 )
 
-// Modos de los guardrails de comportamiento.
+// Behaviour guardrail modes.
 const (
-	BehaviorOff     = "off"     // desactivado (también el valor vacío)
-	BehaviorObserve = "observe" // solo audita anomalías; no bloquea
-	BehaviorEnforce = "enforce" // anomalías escalan a aprobación; rate excedido se deniega
+	BehaviorOff     = "off"     // disabled (also the empty value)
+	BehaviorObserve = "observe" // audits anomalies only; does not block
+	BehaviorEnforce = "enforce" // anomalies escalate to approval; rate exceeded is denied
 )
 
-// BehaviorConfig configura los guardrails de comportamiento por agente.
+// BehaviorConfig configures per-agent behaviour guardrails.
 type BehaviorConfig struct {
 	// Mode: "off"|"observe"|"enforce".
 	Mode string `json:"mode,omitempty"`
-	// RateLimitPerMin: máximo de peticiones por sujeto y minuto (0 = sin límite).
+	// RateLimitPerMin: maximum requests per subject per minute (0 = no limit).
 	RateLimitPerMin int `json:"rate_limit_per_min,omitempty"`
 }
 
-// BehaviorTracker detecta desviaciones del comportamiento normal de cada agente:
-// picos de tasa, hosts nunca usados antes y comandos fuera del histórico. Es
-// estadístico/basado en reglas (sin ML). El estado vive en memoria (se calienta
-// en runtime); reiniciar el control plane reinicia la línea base.
+// BehaviorTracker detects deviations from each agent's normal behaviour: rate
+// spikes, previously unseen hosts, and commands outside its history. It is
+// rule/statistics-based (no ML). State lives in memory (warmed at runtime);
+// restarting the control plane resets the baseline.
 type BehaviorTracker struct {
 	mu       sync.Mutex
 	cfg      BehaviorConfig
@@ -32,28 +32,29 @@ type BehaviorTracker struct {
 }
 
 type subjectState struct {
-	events []time.Time         // ventana deslizante de tiempos de petición (para tasa)
-	hosts  map[string]struct{} // hosts vistos
-	cmds   map[string]struct{} // fingerprints de comando vistos (primer token)
+	events []time.Time         // sliding window of request timestamps (for rate)
+	hosts  map[string]struct{} // seen hosts
+	cmds   map[string]struct{} // seen command fingerprints (first token)
 }
 
-// NewBehaviorTracker crea un tracker con la configuración dada.
+// NewBehaviorTracker creates a tracker with the given configuration.
 func NewBehaviorTracker(cfg BehaviorConfig) *BehaviorTracker {
 	return &BehaviorTracker{cfg: cfg, subjects: make(map[string]*subjectState)}
 }
 
-// Enabled indica si los guardrails están activos (observe o enforce).
+// Enabled reports whether guardrails are active (observe or enforce).
 func (t *BehaviorTracker) Enabled() bool {
 	return t.cfg.Mode == BehaviorObserve || t.cfg.Mode == BehaviorEnforce
 }
 
-// Enforcing indica si el modo es enforce (bloquea/escala en vez de solo auditar).
+// Enforcing reports whether the mode is enforce (blocks/escalates instead of
+// only auditing).
 func (t *BehaviorTracker) Enforcing() bool { return t.cfg.Mode == BehaviorEnforce }
 
-// Check registra una petición del sujeto (broker o usuario final) y devuelve las
-// anomalías detectadas y si se ha superado el límite de tasa. La primera petición
-// de un sujeto establece la línea base: no se marcan new-host/new-command (solo en
-// peticiones posteriores con host/comando novedosos).
+// Check records a request from the subject (broker or end user) and returns
+// detected anomalies and whether the rate limit has been exceeded. The first
+// request from a subject establishes the baseline: new-host/new-command are
+// not flagged (only on subsequent requests with novel host/command).
 func (t *BehaviorTracker) Check(subject, host, command string) (anomalies []string, exceeded bool) {
 	if !t.Enabled() {
 		return nil, false
@@ -68,8 +69,8 @@ func (t *BehaviorTracker) Check(subject, host, command string) (anomalies []stri
 	}
 	now := time.Now()
 
-	// Límite de tasa (ventana deslizante de 1 minuto). Se cuentan también los
-	// intentos bloqueados para que no se pueda burlar el límite.
+	// Rate limit (1-minute sliding window). Blocked attempts are also counted
+	// to prevent rate-limit evasion.
 	if t.cfg.RateLimitPerMin > 0 {
 		cutoff := now.Add(-time.Minute)
 		kept := st.events[:0]
@@ -85,7 +86,8 @@ func (t *BehaviorTracker) Check(subject, host, command string) (anomalies []stri
 		}
 	}
 
-	// Host/comando novedosos: solo tras establecer la línea base (sujeto ya visto).
+	// Novel host/command: only after the baseline is established (subject already
+	// seen).
 	fp := firstToken(command)
 	if seen {
 		if _, ok := st.hosts[host]; !ok {
@@ -104,8 +106,8 @@ func (t *BehaviorTracker) Check(subject, host, command string) (anomalies []stri
 	return anomalies, exceeded
 }
 
-// firstToken devuelve el primer token (el programa) de un comando, como
-// fingerprint. P. ej. "systemctl restart nginx" → "systemctl".
+// firstToken returns the first token (the program name) of a command, used as
+// a fingerprint. E.g. "systemctl restart nginx" → "systemctl".
 func firstToken(command string) string {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
