@@ -1,7 +1,7 @@
-// Package broker contiene el núcleo compartido: configuración y el motor que,
-// por cada petición, firma un certificado SSH efímero, ejecuta el comando y lo
-// audita. Lo usan tanto el frontend HTTP/mTLS (cmd/broker) como el servidor MCP
-// (cmd/mcp-broker), de modo que la lógica de seguridad vive en un solo sitio.
+// Package broker contains the shared core: configuration and the engine that,
+// per request, signs an ephemeral SSH certificate, executes the command, and
+// audits the result. Used by both the HTTP/mTLS frontend (cmd/broker) and the
+// MCP server (cmd/mcp-broker), so security logic lives in a single place.
 package broker
 
 import (
@@ -24,131 +24,133 @@ import (
 	sshrun "github.com/luisgf/ssh-broker/internal/ssh"
 )
 
-// Config se carga desde un fichero JSON.
+// Config is loaded from a JSON file.
 type Config struct {
-	Listen string `json:"listen"` // solo HTTP: p. ej. ":8443"
+	Listen string `json:"listen"` // HTTP only: e.g. ":8443"
 
-	// TLS / mTLS del frontend HTTP (no usado por el MCP, que va sobre stdio).
+	// TLS / mTLS for the HTTP frontend (not used by the MCP, which runs over stdio).
 	ServerCert string `json:"server_cert"`
 	ServerKey  string `json:"server_key"`
 	ClientCA   string `json:"client_ca"`
 
-	// CAKey — SOLO modo local (firma en proceso). Si se define el bloque Signer,
-	// este campo se ignora y el broker no custodia clave de CA.
+	// CAKey — LOCAL mode ONLY (in-process signing). When the Signer block is
+	// present, this field is ignored and the broker holds no CA key.
 	CAKey string `json:"ca_key,omitempty"`
 
-	// Signer, si está presente, externaliza la firma a un servicio remoto
-	// (HTTP+mTLS). El broker deja de tener la clave de CA y la política.
+	// Signer, when present, externalises signing to a remote service
+	// (HTTP+mTLS). The broker no longer holds the CA key or the policy.
 	Signer *SignerClientConfig `json:"signer,omitempty"`
 
-	// Auditoría.
+	// Audit.
 	AuditLog string `json:"audit_log"`
-	AuditKey string `json:"audit_key"` // semilla Ed25519 (>=32 bytes)
+	AuditKey string `json:"audit_key"` // Ed25519 seed (>=32 bytes)
 
-	// SourceAddress: IP/CIDR de egreso del broker, usado en modo local.
+	// SourceAddress: broker egress IP/CIDR, used in local mode.
 	SourceAddress string `json:"source_address"`
 
-	// MaxTTLSeconds limita superiormente el TTL solicitable.
+	// MaxTTLSeconds caps the maximum requestable TTL.
 	MaxTTLSeconds int `json:"max_ttl_seconds"`
 
-	// HostsRefreshSeconds: intervalo de recarga del listado de hosts desde el
-	// signer. Solo aplica en modo remoto. Default: 300 (5 minutos).
+	// HostsRefreshSeconds: host-list reload interval from the signer. Remote
+	// mode only. Default: 300 (5 minutes).
 	HostsRefreshSeconds int `json:"hosts_refresh_seconds"`
 
-	// Sesiones persistentes: cierre por inactividad y vida máxima.
+	// Persistent session idle-close and maximum lifetime.
 	SessionIdleSeconds int `json:"session_idle_seconds"` // default 300
 	SessionMaxSeconds  int `json:"session_max_seconds"`  // default 1800
 
-	// Hosts: solo usado en modo local (single-binary). En modo remoto la lista
-	// de hosts se obtiene del signer vía /v1/hosts y se recarga periódicamente.
+	// Hosts: used only in local mode (single-binary). In remote mode the host
+	// list is fetched from the signer via /v1/hosts and refreshed periodically.
 	Hosts map[string]HostConfig `json:"hosts,omitempty"`
 
-	// OAuth y ResourceURL solo los usa el frontend HTTP+OAuth (cmd/mcp-broker-http);
-	// el resto de frontends los ignoran.
+	// OAuth and ResourceURL are used only by the HTTP+OAuth frontend
+	// (cmd/mcp-broker-http); other frontends ignore them.
 	OAuth *OAuthConfig `json:"oauth,omitempty"`
-	// ResourceURL es la URL canónica de este servidor MCP, usada en el documento
-	// Protected Resource Metadata (RFC 9728) y en la cabecera WWW-Authenticate.
+	// ResourceURL is the canonical URL of this MCP server, used in the Protected
+	// Resource Metadata document (RFC 9728) and the WWW-Authenticate header.
 	ResourceURL string `json:"resource_url,omitempty"`
 }
 
-// OAuthConfig configura la validación de tokens OIDC del frontend HTTP. El token
-// se valida localmente contra el JWKS del issuer (descubrimiento automático).
+// OAuthConfig configures OIDC token validation for the HTTP frontend. The
+// token is validated locally against the issuer's JWKS (auto-discovery).
 type OAuthConfig struct {
-	// Issuer es la URL del proveedor OIDC (p. ej. https://keycloak.example/realms/x).
+	// Issuer is the OIDC provider URL (e.g. https://keycloak.example/realms/x).
 	Issuer string `json:"issuer"`
-	// Audience es el valor esperado del claim aud (este resource server).
+	// Audience is the expected value of the aud claim (this resource server).
 	Audience string `json:"audience"`
-	// RequiredScopes son los scopes que el token debe portar para acceder.
+	// RequiredScopes are the scopes the token must carry to be accepted.
 	RequiredScopes []string `json:"required_scopes,omitempty"`
-	// UserClaim es el claim usado como identidad del usuario (default "sub").
+	// UserClaim is the claim used as user identity (default "sub").
 	UserClaim string `json:"user_claim,omitempty"`
-	// GroupsClaim es el claim que porta los grupos/roles a propagar al signer.
-	// Vacío = no se propagan grupos (sin RBAC por usuario).
+	// GroupsClaim is the claim that carries groups/roles to propagate to the
+	// signer. Empty = groups are not propagated (no per-user RBAC).
 	GroupsClaim string `json:"groups_claim,omitempty"`
-	// MaxTokenAgeSeconds limita la antigüedad del token desde su emisión (claim iat).
-	// 0 = sin límite (acepta cualquier token dentro de su exp). Recomendado: 3600 (1h).
-	// M3: reduce el riesgo de replay de tokens filtrados dentro de su ventana exp.
+	// MaxTokenAgeSeconds limits the age of the token since issuance (iat claim).
+	// 0 = no limit (accepts any token within its exp). Recommended: 3600 (1h).
+	// M3: reduces the replay risk of leaked tokens within their exp window.
 	MaxTokenAgeSeconds int `json:"max_token_age_seconds,omitempty"`
 }
 
-// HostConfig describe un destino en modo local.
+// HostConfig describes a destination in local mode.
 type HostConfig struct {
 	Addr      string `json:"addr"`
 	User      string `json:"user"`
 	Principal string `json:"principal"`
 	HostKey   string `json:"host_key"`
 	Jump      string `json:"jump,omitempty"`
-	// SourceAddress: override del global para el cert de ESTE host.
-	// SOLO modo local.
+	// SourceAddress: per-host override of the global value for THIS host's cert.
+	// LOCAL mode only.
 	SourceAddress string `json:"source_address,omitempty"`
 
-	// Elevación (NOPASSWD) — modo local.
+	// Elevation (NOPASSWD) — local mode.
 	AllowSudo        bool     `json:"allow_sudo,omitempty"`
 	AllowedSudoUsers []string `json:"allowed_sudo_users,omitempty"`
 
-	// AllowPTY — modo local.
+	// AllowPTY — local mode.
 	AllowPTY bool `json:"allow_pty,omitempty"`
 
-	// CommandPolicy — modo local (AI-action firewall). En modo remoto la define
-	// el signer en signer.json.
+	// CommandPolicy — local mode (AI-action firewall). In remote mode this is
+	// defined by the signer in signer.json.
 	CommandPolicy signer.CommandPolicy `json:"command_policy,omitempty"`
 }
 
-// SignerClientConfig configura el cliente del servicio de firma externo (signer
-// directo o control plane).
+// SignerClientConfig configures the client for the external signing service
+// (direct signer or control plane).
 type SignerClientConfig struct {
 	URL        string `json:"url"`
 	ClientCert string `json:"client_cert"`
 	ClientKey  string `json:"client_key"`
 	CA         string `json:"ca"`
-	// ApprovalWaitSeconds: tiempo máximo que el broker espera a que se resuelva una
-	// aprobación humana (respuesta 202 del control plane). 0 = no esperar.
+	// ApprovalWaitSeconds: maximum time the broker waits for a human approval to
+	// be resolved (202 response from the control plane). 0 = do not wait.
 	ApprovalWaitSeconds int `json:"approval_wait_seconds,omitempty"`
 }
 
-// Caller identifica el origen de una petición. ID es la identidad para auditoría
-// (sub/preferred_username de OIDC en el frontend HTTP, CN mTLS, o "mcp-stdio").
-// Groups son los grupos RBAC aseverados por el frontend (OIDC); vacío en stdio y
-// mTLS. Cuando Groups no está vacío, el signer aplica autorización por usuario.
+// Caller identifies the origin of a request. ID is the audit identity
+// (sub/preferred_username from OIDC in the HTTP frontend, mTLS CN, or
+// "mcp-stdio"). Groups are the RBAC groups asserted by the frontend (OIDC);
+// empty in stdio and mTLS. When Groups is non-empty the signer applies
+// per-user authorisation.
 type Caller struct {
 	ID     string
 	Groups []string
 }
 
-// ExecOptions contiene las opciones de elevación y PTY para una ejecución.
+// ExecOptions holds the elevation and PTY options for an execution.
 type ExecOptions struct {
-	// Sudo solicita elevación de privilegio vía sudo NOPASSWD.
+	// Sudo requests privilege elevation via sudo NOPASSWD.
 	Sudo bool
-	// SudoUser es el usuario destino del sudo (vacío = root).
+	// SudoUser is the target user for sudo (empty = root).
 	SudoUser string
-	// PTY solicita un pseudo-terminal para la ejecución.
+	// PTY requests a pseudo-terminal for the execution.
 	PTY bool
-	// DryRun simula: resuelve la política y devuelve la decisión sin conectar ni
-	// ejecutar. Permite al modelo previsualizar si un comando sería permitido.
+	// DryRun simulates: resolves the policy and returns the decision without
+	// connecting or executing. Allows the model to preview whether a command
+	// would be permitted.
 	DryRun bool
 }
 
-// elevationLabel construye la etiqueta de auditoría para la elevación.
+// elevationLabel builds the audit label for the elevation.
 func (o ExecOptions) elevationLabel() string {
 	if !o.Sudo {
 		return ""
@@ -160,7 +162,7 @@ func (o ExecOptions) elevationLabel() string {
 	return "sudo:" + u
 }
 
-// LoadConfig lee y valida la configuración JSON.
+// LoadConfig reads and parses the JSON configuration.
 func LoadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -176,40 +178,40 @@ func LoadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
-// Result es el resultado de una ejecución.
+// Result is the outcome of an execution.
 type Result struct {
 	Stdout   string
 	Stderr   string
 	ExitCode int
 	Serial   uint64
-	// DryRun se rellena solo en simulaciones (ExecOptions.DryRun): contiene la
-	// decisión de política en lugar de la salida de un comando ejecutado.
+	// DryRun is populated only for simulations (ExecOptions.DryRun): it contains
+	// the policy decision instead of the output of an executed command.
 	DryRun *signer.DecisionInfo
 }
 
-// hostFetcher obtiene la lista de hosts del signer. Implementada por *signer.Remote.
+// hostFetcher retrieves the host list from the signer. Implemented by *signer.Remote.
 type hostFetcher interface {
 	FetchHosts(context.Context, string) (map[string]signer.HostInfo, error)
 }
 
-// Engine ejecuta comandos firmando credenciales efímeras y auditando.
+// Engine executes commands by signing ephemeral credentials and auditing.
 type Engine struct {
 	cfg      *Config
 	sgn      signer.Signer
-	fetcher  hostFetcher // nil en modo local
+	fetcher  hostFetcher // nil in local mode
 	auditLog *audit.Log
 	maxTTL   time.Duration
 	sessions *sessionManager
 
 	mu    sync.RWMutex
-	hosts map[string]signer.HostInfo // cache recargado periódicamente (modo remoto)
-	// En modo local los hosts vienen de cfg.Hosts; hosts no se usa.
+	hosts map[string]signer.HostInfo // cache refreshed periodically (remote mode)
+	// In local mode hosts come from cfg.Hosts; the hosts map is not used.
 }
 
-// localCaller es la identidad del broker frente a un firmante local.
+// localCaller is the broker's identity toward a local signer.
 const localCaller = "local"
 
-// NewEngine inicializa el firmante (local o remoto) y el log de auditoría.
+// NewEngine initialises the signer (local or remote) and the audit log.
 func NewEngine(cfg *Config) (*Engine, error) {
 	maxTTL := time.Duration(cfg.MaxTTLSeconds) * time.Second
 	if maxTTL <= 0 {
@@ -223,10 +225,10 @@ func NewEngine(cfg *Config) (*Engine, error) {
 
 	seed, err := os.ReadFile(cfg.AuditKey)
 	if err != nil {
-		return nil, fmt.Errorf("leer clave de auditoría: %w", err)
+		return nil, fmt.Errorf("reading audit key: %w", err)
 	}
 	if len(seed) < ed25519.SeedSize {
-		return nil, fmt.Errorf("clave de auditoría demasiado corta")
+		return nil, fmt.Errorf("audit key too short")
 	}
 	al, err := audit.Open(cfg.AuditLog, ed25519.NewKeyFromSeed(seed[:ed25519.SeedSize]))
 	if err != nil {
@@ -248,15 +250,15 @@ func NewEngine(cfg *Config) (*Engine, error) {
 			SessionID: s.id, Outcome: "session_close", Err: "reaped (idle/lifetime)"})
 	})
 
-	// Modo remoto: carga inicial de hosts y arranca la goroutine de recarga.
+	// Remote mode: initial host load and start the refresh goroutine.
 	if fetcher != nil {
 		h, err := fetcher.FetchHosts(context.Background(), "")
 		if err != nil {
 			al.Close()
-			return nil, fmt.Errorf("carga inicial de hosts desde signer: %w", err)
+			return nil, fmt.Errorf("initial host load from signer: %w", err)
 		}
 		e.hosts = h
-		log.Printf("hosts cargados desde signer: %d entradas", len(h))
+		log.Printf("hosts loaded from signer: %d entries", len(h))
 
 		refresh := time.Duration(cfg.HostsRefreshSeconds) * time.Second
 		if refresh <= 0 {
@@ -268,8 +270,8 @@ func NewEngine(cfg *Config) (*Engine, error) {
 	return e, nil
 }
 
-// startHostRefresh arranca la goroutine que recarga la lista de hosts
-// periódicamente desde el signer.
+// startHostRefresh starts the goroutine that periodically reloads the host
+// list from the signer.
 func (e *Engine) startHostRefresh(interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
@@ -277,24 +279,24 @@ func (e *Engine) startHostRefresh(interval time.Duration) {
 		for range t.C {
 			h, err := e.fetcher.FetchHosts(context.Background(), "")
 			if err != nil {
-				log.Printf("advertencia: recarga de hosts fallida: %v (manteniendo cache anterior)", err)
+				log.Printf("warning: host refresh failed: %v (keeping previous cache)", err)
 				continue
 			}
 			e.mu.Lock()
 			e.hosts = h
 			e.mu.Unlock()
-			log.Printf("hosts recargados desde signer: %d entradas", len(h))
+			log.Printf("hosts reloaded from signer: %d entries", len(h))
 		}
 	}()
 }
 
-// buildSigner construye un firmante remoto (si hay bloque Signer) o local.
-// Devuelve también el *Remote para FetchHosts (nil en modo local).
+// buildSigner constructs a remote signer (when a Signer block is present) or a
+// local one. Also returns the *Remote for FetchHosts (nil in local mode).
 func buildSigner(cfg *Config, maxTTL time.Duration) (signer.Signer, hostFetcher, error) {
 	if cfg.Signer != nil {
 		tlsCfg, err := auth.ClientTLSConfig(cfg.Signer.ClientCert, cfg.Signer.ClientKey, cfg.Signer.CA)
 		if err != nil {
-			return nil, nil, fmt.Errorf("tls cliente de firma: %w", err)
+			return nil, nil, fmt.Errorf("signing client TLS: %w", err)
 		}
 		r := signer.NewRemote(cfg.Signer.URL, tlsCfg, 0)
 		if cfg.Signer.ApprovalWaitSeconds > 0 {
@@ -302,10 +304,10 @@ func buildSigner(cfg *Config, maxTTL time.Duration) (signer.Signer, hostFetcher,
 		}
 		return r, r, nil
 	}
-	// Modo local: clave de CA en proceso + política derivada de los hosts.
+	// Local mode: CA key in-process + policy derived from hosts.
 	caPEM, err := os.ReadFile(cfg.CAKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("leer clave de CA (modo local): %w", err)
+		return nil, nil, fmt.Errorf("reading CA key (local mode): %w", err)
 	}
 	caKey, err := ca.LoadCAFromPEM(caPEM)
 	if err != nil {
@@ -314,8 +316,8 @@ func buildSigner(cfg *Config, maxTTL time.Duration) (signer.Signer, hostFetcher,
 	return signer.NewLocal(caKey, policyFromHosts(cfg), maxTTL), nil, nil
 }
 
-// policyFromHosts deriva la PolicyTable del firmante local a partir de la config
-// de hosts del broker (modo single-binary, sin servicio externo).
+// policyFromHosts derives the signer's PolicyTable from the broker's host
+// config (single-binary mode, no external service).
 func policyFromHosts(cfg *Config) signer.PolicyTable {
 	pt := signer.PolicyTable{}
 	for name, hc := range cfg.Hosts {
@@ -340,17 +342,17 @@ func policyFromHosts(cfg *Config) signer.PolicyTable {
 	return pt
 }
 
-// hostInfo devuelve los datos de conectividad de un host, independientemente
-// del modo (local o remoto).
+// hostInfo returns connectivity data for a host regardless of mode (local or
+// remote).
 func (e *Engine) hostInfo(name string) (signer.HostInfo, bool) {
 	if e.fetcher != nil {
-		// Modo remoto: cache protegido por RWMutex.
+		// Remote mode: cache protected by RWMutex.
 		e.mu.RLock()
 		h, ok := e.hosts[name]
 		e.mu.RUnlock()
 		return h, ok
 	}
-	// Modo local: leer de cfg.Hosts.
+	// Local mode: read from cfg.Hosts.
 	hc, ok := e.cfg.Hosts[name]
 	if !ok {
 		return signer.HostInfo{}, false
@@ -358,16 +360,16 @@ func (e *Engine) hostInfo(name string) (signer.HostInfo, bool) {
 	return signer.HostInfo{Addr: hc.Addr, User: hc.User, HostKey: hc.HostKey, Jump: hc.Jump, AllowSudo: hc.AllowSudo, AllowPTY: hc.AllowPTY}, true
 }
 
-// ServerInfo contiene el nombre lógico y las capacidades de un host,
-// para que el modelo pueda elegir la estrategia de ejecución adecuada.
+// ServerInfo contains the logical name and capabilities of a host, so the
+// model can choose the appropriate execution strategy.
 type ServerInfo struct {
 	Name      string
 	AllowSudo bool
 	AllowPTY  bool
-	Jump      string // nombre del bastión, si lo tiene
+	Jump      string // bastion name, if any
 }
 
-// ServerInfos devuelve los hosts configurados con sus capacidades (orden estable).
+// ServerInfos returns the configured hosts with their capabilities (stable order).
 func (e *Engine) ServerInfos() []ServerInfo {
 	var infos []ServerInfo
 	if e.fetcher != nil {
@@ -387,7 +389,7 @@ func (e *Engine) ServerInfos() []ServerInfo {
 	return infos
 }
 
-// Servers devuelve los nombres de host configurados (orden estable).
+// Servers returns the configured host names (stable order).
 func (e *Engine) Servers() []string {
 	var names []string
 	if e.fetcher != nil {
@@ -407,16 +409,16 @@ func (e *Engine) Servers() []string {
 	return names
 }
 
-// Execute firma un cert efímero acotado (con force-command, y sudo si se pide),
-// ejecuta command en host de un disparo (a través de bastión si está configurado)
-// y audita.
+// Execute signs a scoped ephemeral cert (with force-command, and sudo when
+// requested), executes command on host in a single shot (via bastion if
+// configured), and audits.
 func (e *Engine) Execute(ctx context.Context, c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
 	if _, ok := e.hostInfo(host); !ok {
-		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "denied", Err: "host desconocido"})
-		return nil, fmt.Errorf("host desconocido: %q", host)
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "denied", Err: "unknown host"})
+		return nil, fmt.Errorf("unknown host: %q", host)
 	}
 	if command == "" {
-		return nil, fmt.Errorf("command obligatorio")
+		return nil, fmt.Errorf("command is required")
 	}
 
 	if opts.DryRun {
@@ -431,7 +433,7 @@ func (e *Engine) Execute(ctx context.Context, c Caller, host, command string, tt
 	conn, err := sshrun.Dial(hops, 0)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
-		return nil, fmt.Errorf("conexión: %w", err)
+		return nil, fmt.Errorf("connection: %w", err)
 	}
 	defer conn.Close()
 
@@ -439,7 +441,7 @@ func (e *Engine) Execute(ctx context.Context, c Caller, host, command string, tt
 	res, err := sshrun.ExecOnce(conn.Client, command, execOpts)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
-		return nil, fmt.Errorf("ejecución: %w", err)
+		return nil, fmt.Errorf("execution: %w", err)
 	}
 	e.auditE(audit.Entry{
 		Caller:    c.ID,
@@ -454,9 +456,9 @@ func (e *Engine) Execute(ctx context.Context, c Caller, host, command string, tt
 	return &Result{Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, Serial: serial}, nil
 }
 
-// dryRun resuelve la política para el host destino y devuelve la decisión sin
-// conectar ni ejecutar. Solo evalúa el destino (la command policy vive ahí); no
-// firma certificados usables ni recorre la cadena de bastiones.
+// dryRun resolves the policy for the target host and returns the decision
+// without connecting or executing. Only evaluates the target (command policy
+// lives there); does not issue usable certificates or traverse the bastion chain.
 func (e *Engine) dryRun(ctx context.Context, c Caller, host, command string, ttlSeconds int, opts ExecOptions) (*Result, error) {
 	_, pub, err := ca.GenerateEphemeralKey()
 	if err != nil {
@@ -506,8 +508,8 @@ func (e *Engine) ttlFor(ttlSeconds int) time.Duration {
 	return ttl
 }
 
-// buildHops resuelve la cadena destino→…→bastión y, por hop, genera un par efímero
-// y pide al firmante un cert para la intención.
+// buildHops resolves the target→…→bastion chain and, per hop, generates an
+// ephemeral key pair and requests a cert from the signer.
 func (e *Engine) buildHops(ctx context.Context, c Caller, host string, ttl time.Duration, purpose, command string, opts ExecOptions) ([]sshrun.Hop, uint64, error) {
 	chain, err := e.resolveChain(host)
 	if err != nil {
@@ -537,21 +539,21 @@ func (e *Engine) buildHops(ctx context.Context, c Caller, host string, ttl time.
 		if isTarget {
 			in.Role = signer.RoleTarget
 			in.Command = command
-			// Elevación y PTY solo en el hop destino.
+			// Elevation and PTY only at the target hop.
 			in.Sudo = opts.Sudo
 			in.SudoUser = opts.SudoUser
 			in.PTY = opts.PTY
 		}
 		issued, err := e.sgn.SignIntent(ctx, in)
 		if err != nil {
-			return nil, 0, fmt.Errorf("firmar cert de %q: %w", name, err)
+			return nil, 0, fmt.Errorf("signing cert for %q: %w", name, err)
 		}
 		if issued.Certificate == nil {
 			return nil, 0, approvalError(name, issued.Decision)
 		}
 		hostKey, err := ParseHostKey(hi.HostKey)
 		if err != nil {
-			return nil, 0, fmt.Errorf("host key de %q: %w", name, err)
+			return nil, 0, fmt.Errorf("host key for %q: %w", name, err)
 		}
 		hops = append(hops, sshrun.Hop{
 			Addr: hi.Addr, User: hi.User, HostKey: hostKey,
@@ -564,8 +566,8 @@ func (e *Engine) buildHops(ctx context.Context, c Caller, host string, ttl time.
 	return hops, finalSerial, nil
 }
 
-// buildHopsWithPrefix es igual que buildHops pero además devuelve el
-// ElevationPrefix emitido por el firmante para el hop target (sesiones).
+// buildHopsWithPrefix is like buildHops but also returns the ElevationPrefix
+// issued by the signer for the target hop (sessions).
 func (e *Engine) buildHopsWithPrefix(ctx context.Context, c Caller, host string, ttl time.Duration, purpose string, opts ExecOptions) ([]sshrun.Hop, uint64, string, error) {
 	chain, err := e.resolveChain(host)
 	if err != nil {
@@ -601,14 +603,14 @@ func (e *Engine) buildHopsWithPrefix(ctx context.Context, c Caller, host string,
 		}
 		issued, err := e.sgn.SignIntent(ctx, in)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("firmar cert de %q: %w", name, err)
+			return nil, 0, "", fmt.Errorf("signing cert for %q: %w", name, err)
 		}
 		if issued.Certificate == nil {
 			return nil, 0, "", approvalError(name, issued.Decision)
 		}
 		hostKey, err := ParseHostKey(hi.HostKey)
 		if err != nil {
-			return nil, 0, "", fmt.Errorf("host key de %q: %w", name, err)
+			return nil, 0, "", fmt.Errorf("host key for %q: %w", name, err)
 		}
 		hops = append(hops, sshrun.Hop{
 			Addr: hi.Addr, User: hi.User, HostKey: hostKey,
@@ -622,30 +624,30 @@ func (e *Engine) buildHopsWithPrefix(ctx context.Context, c Caller, host string,
 	return hops, finalSerial, elevPrefix, nil
 }
 
-// approvalError construye el error que ve un broker cuando un cert no se emite
-// por requerir aprobación humana. En la ruta directa broker→signer (sin control
-// plane) la aprobación no puede orquestarse, así que se informa al usuario.
+// approvalError builds the error shown to a broker when a cert is not issued
+// because human approval is required. On the direct broker→signer path (no
+// control plane) approval cannot be orchestrated, so the user is informed.
 func approvalError(host string, d *signer.DecisionInfo) error {
 	rule := ""
 	if d != nil {
 		rule = d.MatchedRule
 	}
-	return fmt.Errorf("el comando en %q requiere aprobación humana (%s); usar el control plane para aprobarlo", host, rule)
+	return fmt.Errorf("command on %q requires human approval (%s); use the control plane to approve it", host, rule)
 }
 
-// resolveChain devuelve la cadena de hosts en orden de marcado (bastión más
-// externo primero, destino último), siguiendo el campo Jump y detectando ciclos.
+// resolveChain returns the host chain in dial order (outermost bastion first,
+// target last), following Jump fields and detecting cycles.
 func (e *Engine) resolveChain(host string) ([]string, error) {
 	var chain []string
 	seen := map[string]bool{}
 	for cur := host; cur != ""; {
 		if seen[cur] {
-			return nil, fmt.Errorf("ciclo de bastión en %q", cur)
+			return nil, fmt.Errorf("bastion cycle at %q", cur)
 		}
 		seen[cur] = true
 		hi, ok := e.hostInfo(cur)
 		if !ok {
-			return nil, fmt.Errorf("host desconocido en cadena: %q", cur)
+			return nil, fmt.Errorf("unknown host in chain: %q", cur)
 		}
 		chain = append([]string{cur}, chain...)
 		cur = hi.Jump
@@ -653,7 +655,7 @@ func (e *Engine) resolveChain(host string) ([]string, error) {
 	return chain, nil
 }
 
-// Close cierra todas las sesiones y el log de auditoría.
+// Close closes all sessions and the audit log.
 func (e *Engine) Close() error {
 	e.sessions.closeAll()
 	return e.auditLog.Close()
@@ -665,17 +667,17 @@ func (e *Engine) auditE(ent audit.Entry) {
 			ent.User = hi.User
 		}
 	}
-	// M1: registrar el error en lugar de descartarlo silenciosamente.
+	// M1: log the error instead of silently discarding it.
 	if err := e.auditLog.Append(ent); err != nil {
-		log.Printf("advertencia: error escribiendo audit log: %v", err)
+		log.Printf("warning: error writing audit log: %v", err)
 	}
 }
 
-// ParseHostKey convierte una línea authorized_keys en ssh.PublicKey.
+// ParseHostKey converts an authorized_keys line into an ssh.PublicKey.
 func ParseHostKey(authorizedKeyLine string) (ssh.PublicKey, error) {
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedKeyLine))
 	if err != nil {
-		return nil, fmt.Errorf("parsear host key: %w", err)
+		return nil, fmt.Errorf("parsing host key: %w", err)
 	}
 	return pk, nil
 }

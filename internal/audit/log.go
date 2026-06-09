@@ -1,7 +1,7 @@
-// Package audit escribe un registro append-only y a prueba de manipulación de
-// cada firma/ejecución: encadena entradas por hash (estilo cadena) y firma cada
-// una con una clave de auditoría Ed25519, de modo que no se puede alterar ni
-// reordenar el histórico sin detectarlo.
+// Package audit writes an append-only, tamper-evident record of every
+// certificate issuance and execution: it chains entries by hash (blockchain
+// style) and signs each one with an Ed25519 audit key, so the history cannot
+// be altered or reordered without detection.
 package audit
 
 import (
@@ -18,50 +18,49 @@ import (
 	"time"
 )
 
-// AuditLogMaxSize es el tamaño máximo del fichero de auditoría antes de rotar
-// a un fichero con sufijo de marca de tiempo. 0 deshabilita la rotación.
-// El valor por defecto (100 MiB) evita que el disco se llene y que la escritura
-// falle silenciosamente.
+// AuditLogMaxSize is the maximum audit file size before rotating to a file
+// with a timestamp suffix. 0 disables rotation. The default (100 MiB) prevents
+// the disk from filling up and writes from failing silently.
 const AuditLogMaxSize int64 = 100 * 1024 * 1024 // 100 MiB
 
-// Entry es un registro de auditoría. Nunca contiene la clave ni el certificado,
-// solo metadatos (incluida la huella del cert y su serial).
+// Entry is an audit record. It never contains the key or the certificate, only
+// metadata (including the cert fingerprint and its serial).
 type Entry struct {
 	Time      time.Time `json:"time"`
-	Caller    string    `json:"caller"`               // identidad del agente (CN del cert mTLS)
-	Host      string    `json:"host"`                 // destino
-	User      string    `json:"user"`                 // cuenta remota
-	Principal string    `json:"principal"`            // principal del cert efímero
-	Command   string    `json:"command"`              // comando solicitado
-	TTL       string    `json:"ttl"`                  // ventana de validez emitida
-	Serial    uint64    `json:"serial"`               // serie del cert (correla con sshd)
-	SessionID string    `json:"session_id,omitempty"` // sesión persistente, si aplica
+	Caller    string    `json:"caller"`               // agent identity (mTLS cert CN)
+	Host      string    `json:"host"`                 // destination
+	User      string    `json:"user"`                 // remote account
+	Principal string    `json:"principal"`            // principal of the ephemeral cert
+	Command   string    `json:"command"`              // requested command
+	TTL       string    `json:"ttl"`                  // issued validity window
+	Serial    uint64    `json:"serial"`               // cert serial (correlates with sshd)
+	SessionID string    `json:"session_id,omitempty"` // persistent session, if applicable
 	Outcome   string    `json:"outcome"`              // executed|denied|error|session_open|session_exec|session_close
-	ExitCode  int       `json:"exit_code"`            // código de salida si se ejecutó
+	ExitCode  int       `json:"exit_code"`            // exit code if executed
 	Err       string    `json:"err,omitempty"`
 
-	// Elevación y PTY (trazabilidad de privilegio).
-	Elevation string `json:"elevation,omitempty"` // p. ej. "sudo:root" o "sudo:deploy"
-	PTY       bool   `json:"pty,omitempty"`       // true si se usó PTY
+	// Elevation and PTY (privilege traceability).
+	Elevation string `json:"elevation,omitempty"` // e.g. "sudo:root" or "sudo:deploy"
+	PTY       bool   `json:"pty,omitempty"`       // true if PTY was used
 
-	// AI-action firewall: trazabilidad de la decisión de command policy.
-	PolicyRule string `json:"policy_rule,omitempty"` // regla de command_policy que casó
-	DryRun     bool   `json:"dry_run,omitempty"`     // true si fue una simulación (no se ejecutó)
+	// AI-action firewall: command policy decision traceability.
+	PolicyRule string `json:"policy_rule,omitempty"` // command_policy rule that matched
+	DryRun     bool   `json:"dry_run,omitempty"`     // true if this was a simulation (not executed)
 
-	// Aprobación humana (control plane).
-	ApprovalID string `json:"approval_id,omitempty"` // id de la solicitud de aprobación
-	ApprovedBy string `json:"approved_by,omitempty"` // CN del aprobador
+	// Human approval (control plane).
+	ApprovalID string `json:"approval_id,omitempty"` // approval request id
+	ApprovedBy string `json:"approved_by,omitempty"` // CN of the approver
 
-	// Guardrails de comportamiento (control plane).
-	Anomaly string `json:"anomaly,omitempty"` // anomalías detectadas (rate-exceeded, new-host:..., new-command:...)
+	// Behaviour guardrails (control plane).
+	Anomaly string `json:"anomaly,omitempty"` // detected anomalies (rate-exceeded, new-host:..., new-command:...)
 
-	// Campos de integridad (rellenados por Log.Append).
+	// Integrity fields (populated by Log.Append).
 	Seq      uint64 `json:"seq"`
 	PrevHash string `json:"prev_hash"`
 	Sig      string `json:"sig"`
 }
 
-// Log es un escritor de auditoría concurrente que encadena y firma entradas.
+// Log is a concurrent audit writer that chains and signs entries.
 type Log struct {
 	mu          sync.Mutex
 	f           *os.File
@@ -69,45 +68,45 @@ type Log struct {
 	signKey     ed25519.PrivateKey
 	prevHash    string
 	seq         uint64
-	maxFileSize int64 // 0 = sin rotación
+	maxFileSize int64 // 0 = no rotation
 }
 
-// Open abre (o crea) el fichero de auditoría en append y prepara la firma.
-// A4: restaura seq y prevHash desde la última entrada existente para preservar
-// la cadena de integridad entre reinicios del proceso.
-// L2: aplica rotación automática cuando el fichero supera AuditLogMaxSize.
+// Open opens (or creates) the audit file in append mode and prepares signing.
+// A4: restores seq and prevHash from the last existing entry to preserve the
+// integrity chain across process restarts.
+// L2: applies automatic rotation when the file exceeds AuditLogMaxSize.
 func Open(path string, signKey ed25519.PrivateKey) (*Log, error) {
 	l := &Log{
 		path:        path,
 		signKey:     signKey,
 		maxFileSize: AuditLogMaxSize,
 	}
-	// A4: restaurar la cadena desde el log existente (si lo hay).
+	// A4: restore the chain from the existing log (if any).
 	if err := l.restoreChain(); err != nil {
-		return nil, fmt.Errorf("restaurar cadena de auditoría: %w", err)
+		return nil, fmt.Errorf("restoring audit chain: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("abrir log de auditoría: %w", err)
+		return nil, fmt.Errorf("opening audit log: %w", err)
 	}
 	l.f = f
 	return l, nil
 }
 
-// restoreChain lee la última línea del log existente y restaura seq y prevHash.
-// Esto garantiza que la cadena no se rompe cuando el proceso se reinicia.
+// restoreChain reads the last line of the existing log and restores seq and
+// prevHash. This ensures the chain is not broken when the process restarts.
 func (l *Log) restoreChain() error {
 	f, err := os.Open(l.path)
 	if os.IsNotExist(err) {
-		return nil // fichero nuevo — cadena arranca desde cero
+		return nil // new file — chain starts from zero
 	}
 	if err != nil {
-		return fmt.Errorf("leer log existente: %w", err)
+		return fmt.Errorf("reading existing log: %w", err)
 	}
 	defer f.Close()
 
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 256*1024), 256*1024) // entradas de hasta 256 KiB
+	sc.Buffer(make([]byte, 256*1024), 256*1024) // entries up to 256 KiB
 	var lastLine []byte
 	for sc.Scan() {
 		if b := sc.Bytes(); len(b) > 0 {
@@ -116,15 +115,15 @@ func (l *Log) restoreChain() error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("escanear log existente: %w", err)
+		return fmt.Errorf("scanning existing log: %w", err)
 	}
 	if len(lastLine) == 0 {
-		return nil // fichero vacío — cadena arranca desde cero
+		return nil // empty file — chain starts from zero
 	}
 
 	var e Entry
 	if err := json.Unmarshal(lastLine, &e); err != nil {
-		return fmt.Errorf("parsear última entrada del log: %w", err)
+		return fmt.Errorf("parsing last log entry: %w", err)
 	}
 	l.seq = e.Seq
 	sum := sha256.Sum256(lastLine)
@@ -132,9 +131,9 @@ func (l *Log) restoreChain() error {
 	return nil
 }
 
-// maybeRotate rota el log si supera maxFileSize. Llamar bajo l.mu.
-// L2: crea un fichero con sufijo de marca de tiempo y abre uno nuevo.
-// La cadena del nuevo fichero arranca desde cero.
+// maybeRotate rotates the log if it exceeds maxFileSize. Must be called under
+// l.mu. L2: creates a file with a timestamp suffix and opens a new one. The
+// new file's chain starts from zero.
 func (l *Log) maybeRotate() {
 	if l.maxFileSize <= 0 {
 		return
@@ -146,32 +145,32 @@ func (l *Log) maybeRotate() {
 	rotPath := l.path + "." + time.Now().UTC().Format("20060102T150405Z")
 	_ = l.f.Close()
 	if err := os.Rename(l.path, rotPath); err != nil {
-		// Si el rename falla, reabrir el fichero actual y continuar.
+		// If the rename fails, reopen the current file and continue.
 		f, e2 := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if e2 == nil {
 			l.f = f
 		}
-		log.Printf("advertencia: rotación de audit log fallida (%v); se continúa en el fichero original", err)
+		log.Printf("warning: audit log rotation failed (%v); continuing with original file", err)
 		return
 	}
 	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		log.Printf("advertencia: no se pudo abrir nuevo audit log tras rotación: %v", err)
+		log.Printf("warning: could not open new audit log after rotation: %v", err)
 		return
 	}
 	l.f = f
 	l.seq = 0
 	l.prevHash = ""
-	log.Printf("audit log rotado: %s → %s", l.path, rotPath)
+	log.Printf("audit log rotated: %s → %s", l.path, rotPath)
 }
 
-// Append firma y escribe una entrada. Calcula prev_hash/seq y la firma sobre el
-// contenido canónico (sin el propio campo Sig).
+// Append signs and writes an entry. It computes prev_hash/seq and signs over
+// the canonical content (with the Sig field empty).
 func (l *Log) Append(e Entry) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// L2: rotar si el fichero ha alcanzado el límite de tamaño.
+	// L2: rotate if the file has reached the size limit.
 	l.maybeRotate()
 
 	l.seq++
@@ -181,21 +180,21 @@ func (l *Log) Append(e Entry) error {
 		e.Time = time.Now().UTC()
 	}
 
-	// Firmamos el contenido canónico con Sig vacío; luego rellenamos Sig.
+	// Sign the canonical content with Sig empty; then fill Sig.
 	e.Sig = ""
 	payload, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("serializar payload: %w", err)
+		return fmt.Errorf("serialising payload: %w", err)
 	}
 	sig := ed25519.Sign(l.signKey, payload)
 	e.Sig = base64.StdEncoding.EncodeToString(sig)
 
 	line, err := json.Marshal(e)
 	if err != nil {
-		return fmt.Errorf("serializar línea: %w", err)
+		return fmt.Errorf("serialising line: %w", err)
 	}
 	if _, err := l.f.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("escribir log: %w", err)
+		return fmt.Errorf("writing log: %w", err)
 	}
 	if err := l.f.Sync(); err != nil {
 		return fmt.Errorf("fsync log: %w", err)
@@ -206,7 +205,7 @@ func (l *Log) Append(e Entry) error {
 	return nil
 }
 
-// Close cierra el fichero subyacente.
+// Close closes the underlying file.
 func (l *Log) Close() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

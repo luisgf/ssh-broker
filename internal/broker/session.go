@@ -14,19 +14,19 @@ import (
 	sshrun "github.com/luisgf/ssh-broker/internal/ssh"
 )
 
-// shellExecTimeout acota la espera de salida en sesiones shell/pty.
+// shellExecTimeout caps the output wait in shell/pty sessions.
 const shellExecTimeout = 120 * time.Second
 
-// Límites de sesiones activas para evitar agotamiento de recursos (M2).
+// Active session limits to prevent resource exhaustion (M2).
 const (
-	// maxSessionsGlobal es el número máximo de sesiones simultáneas en todo el broker.
+	// maxSessionsGlobal is the maximum number of concurrent sessions broker-wide.
 	maxSessionsGlobal = 200
-	// maxSessionsPerCaller es el máximo de sesiones simultáneas por caller (usuario/CN).
+	// maxSessionsPerCaller is the maximum concurrent sessions per caller (user/CN).
 	maxSessionsPerCaller = 20
 )
 
-// liveSession es una conexión SSH retenida (= unidad de pool y de sesión
-// persistente). Un solo cert (serial) la autenticó; sus comandos lo reutilizan.
+// liveSession is a retained SSH connection (pool unit and persistent session).
+// A single cert (serial) authenticated it; its commands reuse the connection.
 type liveSession struct {
 	id       string
 	caller   string
@@ -34,14 +34,14 @@ type liveSession struct {
 	serial   uint64
 	mode     string // "exec" | "shell" | "pty"
 	conn     *sshrun.Conn
-	shell    *sshrun.ShellSession // solo en mode "shell" y "pty"
+	shell    *sshrun.ShellSession // only in "shell" and "pty" mode
 	created  time.Time
 	lastUsed time.Time
 
-	// Elevación: prefijo a anteponer en cada comando de sesiones exec.
-	// En sesiones shell/pty la elevación ya está en el proceso shell.
+	// Elevation: prefix to prepend to each command in exec sessions.
+	// In shell/pty sessions the elevation is already in the shell process.
 	elevationPrefix string
-	// pty indica si esta sesión usa PTY.
+	// pty indicates whether this session uses a PTY.
 	pty bool
 }
 
@@ -54,7 +54,7 @@ func (s *liveSession) close() {
 	}
 }
 
-// sessionManager registra y recicla sesiones por inactividad / vida máxima.
+// sessionManager registers and recycles sessions by idle TTL / maximum lifetime.
 type sessionManager struct {
 	mu       sync.Mutex
 	sessions map[string]*liveSession
@@ -103,11 +103,11 @@ func (m *sessionManager) add(s *liveSession) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// M2: límite global de sesiones activas.
+	// M2: global session limit.
 	if len(m.sessions) >= maxSessionsGlobal {
-		return fmt.Errorf("límite global de sesiones alcanzado (%d); cierra sesiones existentes antes de abrir nuevas", maxSessionsGlobal)
+		return fmt.Errorf("global session limit reached (%d); close existing sessions before opening new ones", maxSessionsGlobal)
 	}
-	// M2: límite de sesiones por caller.
+	// M2: per-caller session limit.
 	var callerCount int
 	for _, existing := range m.sessions {
 		if existing.caller == s.caller {
@@ -115,7 +115,7 @@ func (m *sessionManager) add(s *liveSession) error {
 		}
 	}
 	if callerCount >= maxSessionsPerCaller {
-		return fmt.Errorf("límite de sesiones por caller alcanzado (%d); cierra sesiones existentes antes de abrir nuevas", maxSessionsPerCaller)
+		return fmt.Errorf("per-caller session limit reached (%d); close existing sessions before opening new ones", maxSessionsPerCaller)
 	}
 
 	m.sessions[s.id] = s
@@ -152,35 +152,35 @@ func (m *sessionManager) closeAll() {
 	}
 }
 
-// SessionResult es lo que devuelve la apertura de una sesión.
+// SessionResult is what a session open returns.
 type SessionResult struct {
 	SessionID string
 	Serial    uint64
 }
 
-// OpenSession abre una conexión persistente (un cert por conexión, sin
-// force-command) y la registra. opts controla la elevación y el PTY.
+// OpenSession opens a persistent connection (one cert per connection, no
+// force-command) and registers it. opts controls elevation and PTY.
 //
-// Modos:
+// Modes:
 //
-//   - exec  (default): cada comando aislado (ExecOnce). Con sudo, el prefijo
-//     se antepone a cada comando individualmente.
-//   - shell: un /bin/sh con estado (cd, variables). Con sudo, el shell completo
-//     se lanza bajo sudo (sesión elevada).
-//   - pty:   igual que shell pero con PTY (permit-pty en el cert).
+//   - exec  (default): each command is isolated (ExecOnce). With sudo, the
+//     prefix is prepended to each command individually.
+//   - shell: a stateful /bin/sh (cd, variables persist). With sudo, the whole
+//     shell is launched under sudo (elevated session).
+//   - pty:   same as shell but with a PTY (permit-pty in the cert).
 func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, ttlSeconds int, opts ExecOptions) (*SessionResult, error) {
 	if _, ok := e.hostInfo(host); !ok {
-		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "denied", Err: "host desconocido"})
-		return nil, fmt.Errorf("host desconocido: %q", host)
+		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "denied", Err: "unknown host"})
+		return nil, fmt.Errorf("unknown host: %q", host)
 	}
 	if mode == "" {
 		mode = "exec"
 	}
 	if mode != "exec" && mode != "shell" && mode != "pty" {
-		return nil, fmt.Errorf("mode inválido: %q (exec|shell|pty)", mode)
+		return nil, fmt.Errorf("invalid mode: %q (exec|shell|pty)", mode)
 	}
 
-	// PTY implícito en mode=pty.
+	// PTY is implicit in mode=pty.
 	if mode == "pty" {
 		opts.PTY = true
 	}
@@ -193,7 +193,7 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 	conn, err := sshrun.Dial(hops, 0)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
-		return nil, fmt.Errorf("conexión: %w", err)
+		return nil, fmt.Errorf("connection: %w", err)
 	}
 
 	s := &liveSession{
@@ -205,7 +205,7 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 
 	switch mode {
 	case "shell":
-		// shellCmd: si hay elevación arranca el shell directamente bajo sudo.
+		// shellCmd: if elevated, launch the shell directly under sudo.
 		shellCmd := "/bin/sh"
 		if elevPrefix != "" {
 			shellCmd = elevPrefix + " -- /bin/sh"
@@ -214,10 +214,10 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 		if err != nil {
 			conn.Close()
 			e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
-			return nil, fmt.Errorf("abrir shell: %w", err)
+			return nil, fmt.Errorf("opening shell: %w", err)
 		}
 		s.shell = sh
-		// En shell elevado el prefijo va en el proceso; no se reaplica por comando.
+		// In an elevated shell the prefix is in the process; do not reapply per command.
 		s.elevationPrefix = ""
 
 	case "pty":
@@ -229,7 +229,7 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 		if err != nil {
 			conn.Close()
 			e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
-			return nil, fmt.Errorf("abrir shell PTY: %w", err)
+			return nil, fmt.Errorf("opening PTY shell: %w", err)
 		}
 		s.shell = sh
 		s.elevationPrefix = ""
@@ -253,27 +253,27 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 	return &SessionResult{SessionID: s.id, Serial: serial}, nil
 }
 
-// SessionExec ejecuta command en una sesión existente, reutilizando la conexión.
-// En sesiones exec con elevación, antepone el prefijo autorizado por el signer.
+// SessionExec executes command in an existing session, reusing the connection.
+// In exec sessions with elevation, the signer-authorised prefix is prepended.
 func (e *Engine) SessionExec(_ context.Context, c Caller, sessionID, command string) (*Result, error) {
 	s, ok := e.sessions.get(sessionID)
 	if !ok {
-		return nil, fmt.Errorf("sesión desconocida o expirada: %q", sessionID)
+		return nil, fmt.Errorf("unknown or expired session: %q", sessionID)
 	}
-	// C1: verificar que el caller es el propietario de la sesión.
+	// C1: verify that the caller owns the session.
 	if s.caller != c.ID {
-		return nil, fmt.Errorf("sesión %q no pertenece al caller actual", sessionID)
+		return nil, fmt.Errorf("session %q does not belong to the current caller", sessionID)
 	}
 	if command == "" {
-		return nil, fmt.Errorf("command obligatorio")
+		return nil, fmt.Errorf("command is required")
 	}
-	// M5: en sesiones shell/pty los saltos de línea se ejecutarían como comandos
-	// adicionales en el shell; rechazarlos explícitamente.
+	// M5: in shell/pty sessions newlines would execute as additional commands in
+	// the shell; reject them explicitly.
 	if (s.mode == "shell" || s.mode == "pty") && strings.ContainsAny(command, "\n\r") {
-		return nil, fmt.Errorf("el comando contiene saltos de línea; no permitido en sesiones shell/pty")
+		return nil, fmt.Errorf("command contains newlines; not allowed in shell/pty sessions")
 	}
 
-	// En sesiones exec con elevación, construir el comando elevado.
+	// In exec sessions with elevation, build the elevated command.
 	effectiveCommand := command
 	if s.mode == "exec" && s.elevationPrefix != "" {
 		effectiveCommand = buildElevatedExecCommand(s.elevationPrefix, command)
@@ -293,10 +293,10 @@ func (e *Engine) SessionExec(_ context.Context, c Caller, sessionID, command str
 			Caller: c.ID, Host: s.host, Serial: s.serial, SessionID: sessionID,
 			Command: command, Outcome: "error", Err: err.Error(),
 		})
-		return nil, fmt.Errorf("ejecución en sesión: %w", err)
+		return nil, fmt.Errorf("session execution: %w", err)
 	}
 
-	// Etiqueta de elevación para auditoría.
+	// Elevation label for audit.
 	var elevLabel string
 	if s.elevationPrefix != "" {
 		elevLabel = elevationLabelFromPrefix(s.elevationPrefix)
@@ -316,22 +316,22 @@ func (e *Engine) SessionExec(_ context.Context, c Caller, sessionID, command str
 	return &Result{Stdout: res.Stdout, Stderr: res.Stderr, ExitCode: res.ExitCode, Serial: s.serial}, nil
 }
 
-// CloseSession cierra y elimina una sesión.
-// C1: solo el caller que abrió la sesión puede cerrarla.
+// CloseSession closes and removes a session.
+// C1: only the caller that opened the session may close it.
 func (e *Engine) CloseSession(c Caller, sessionID string) error {
-	// Verificar propiedad antes de eliminar para evitar que un caller cierre
-	// sesiones ajenas (C1).
+	// Verify ownership before removing to prevent a caller from closing another
+	// caller's sessions (C1).
 	s, ok := e.sessions.get(sessionID)
 	if !ok {
-		return fmt.Errorf("sesión desconocida: %q", sessionID)
+		return fmt.Errorf("unknown session: %q", sessionID)
 	}
 	if s.caller != c.ID {
-		return fmt.Errorf("sesión %q no pertenece al caller actual", sessionID)
+		return fmt.Errorf("session %q does not belong to the current caller", sessionID)
 	}
-	// Eliminar ahora que sabemos que pertenece al caller.
+	// Remove now that we know the session belongs to this caller.
 	s, ok = e.sessions.remove(sessionID)
 	if !ok {
-		// El reaper la eliminó entre el get y el remove; no es error.
+		// Reaper removed it between the get and the remove; not an error.
 		return nil
 	}
 	s.close()
@@ -339,14 +339,14 @@ func (e *Engine) CloseSession(c Caller, sessionID string) error {
 	return nil
 }
 
-// buildElevatedExecCommand envuelve command con el prefijo de elevación para
-// sesiones exec (cada comando va por separado).
+// buildElevatedExecCommand wraps command with the elevation prefix for exec
+// sessions (each command is sent separately).
 func buildElevatedExecCommand(prefix, command string) string {
 	return fmt.Sprintf("%s -- /bin/sh -c %s", prefix, shellQuoteSession(command))
 }
 
-// shellQuoteSession es una copia local de shellQuote para evitar dependencia
-// circular con signer (que ya tiene la función).
+// shellQuoteSession is a local copy of shellQuote to avoid a circular
+// dependency with the signer package (which already has the function).
 func shellQuoteSession(s string) string {
 	result := "'"
 	for _, c := range s {
@@ -359,14 +359,14 @@ func shellQuoteSession(s string) string {
 	return result + "'"
 }
 
-// elevationLabelFromPrefix construye la etiqueta de auditoría a partir del
-// prefijo guardado en la sesión (p. ej. "sudo -n" → "sudo:root").
+// elevationLabelFromPrefix builds the audit label from the prefix stored in the
+// session (e.g. "sudo -n" → "sudo:root").
 func elevationLabelFromPrefix(prefix string) string {
 	// "sudo -n" → root; "sudo -n -u deploy" → deploy
 	if prefix == "sudo -n" {
 		return "sudo:root"
 	}
-	// Extraer el usuario del flag -u.
+	// Extract the user from the -u flag.
 	const flag = "-u "
 	if idx := len("sudo -n "); idx < len(prefix) {
 		rest := prefix[idx:]

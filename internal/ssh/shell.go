@@ -14,21 +14,22 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// ShellSession mantiene un intérprete de shell vivo sobre una conexión SSH, de
-// modo que el estado (cwd, variables) persiste entre comandos.
+// ShellSession keeps a live shell interpreter over an SSH connection, so that
+// state (cwd, variables) persists between commands.
 //
-// Hay dos variantes:
+// Two variants:
 //
-//   - Sin PTY (mode=shell): arranca /bin/sh directamente. Stdout y stderr van
-//     separados. No hay eco ni prompt. No apta para comandos que comprueben isatty().
+//   - Without PTY (mode=shell): starts /bin/sh directly. stdout and stderr are
+//     separate. No echo, no prompt. Not suitable for commands that check
+//     isatty().
 //
-//   - Con PTY (mode=pty): solicita un pseudo-terminal y arranca el shell bajo él.
-//     Stdout y stderr se mezclan en el canal del PTY. Se deshabilita el eco y se
-//     vacía el prompt (PS1=”) para poder aplicar el mismo protocolo de marcadores.
-//     Apta para programas que requieren un TTY real.
+//   - With PTY (mode=pty): requests a pseudo-terminal and starts the shell
+//     under it. stdout and stderr are merged in the PTY channel. Echo is
+//     disabled and the prompt is cleared (PS1='') so the same marker protocol
+//     can be applied. Suitable for programs that require a real TTY.
 //
-// El fin de cada comando se detecta con un marcador aleatorio que imprime el código
-// de salida. No soporta comandos interactivos que pidan entrada por teclado.
+// End-of-command is detected with a random marker that prints the exit code.
+// Does not support interactive commands that read from the keyboard.
 type lineRes struct {
 	text string
 	err  error
@@ -38,14 +39,14 @@ type ShellSession struct {
 	mu      sync.Mutex
 	session *ssh.Session
 	stdin   io.WriteCloser
-	lines   chan lineRes // alimentado por una única goroutine lectora
-	stderr  *syncBuf     // nil en modo PTY (streams mezclados)
+	lines   chan lineRes // fed by a single reader goroutine
+	stderr  *syncBuf    // nil in PTY mode (merged streams)
 	marker  string
-	pty     bool // true si la sesión usa PTY
+	pty     bool // true if the session uses a PTY
 }
 
-// syncBuf es un buffer concurrente: una goroutine vuelca stderr aquí.
-// A3: limita la acumulación a maxOutputBytes para evitar OOM.
+// syncBuf is a concurrent buffer: a goroutine drains stderr into it.
+// A3: accumulation is capped at maxOutputBytes to prevent OOM.
 type syncBuf struct {
 	mu  sync.Mutex
 	buf strings.Builder
@@ -54,7 +55,7 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A3: descartar silenciosamente los bytes que superen el límite.
+	// A3: silently discard bytes that exceed the limit.
 	if s.buf.Len() >= maxOutputBytes {
 		return len(p), nil
 	}
@@ -79,16 +80,16 @@ func (s *syncBuf) since(start int) string {
 	return full[start:]
 }
 
-// OpenShell arranca un shell (sin PTY) sobre client. shellCmd es el comando a
-// ejecutar remotamente; normalmente "/bin/sh" pero puede ser
-// "sudo -n -- /bin/sh" para elevar la sesión completa.
+// OpenShell starts a shell (without PTY) over client. shellCmd is the command
+// to execute remotely; normally "/bin/sh" but can be "sudo -n -- /bin/sh" to
+// elevate the whole session.
 func OpenShell(client *ssh.Client, shellCmd string) (*ShellSession, error) {
 	if shellCmd == "" {
 		shellCmd = "/bin/sh"
 	}
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, fmt.Errorf("abrir sesión: %w", err)
+		return nil, fmt.Errorf("opening session: %w", err)
 	}
 	stdin, err := session.StdinPipe()
 	if err != nil {
@@ -107,7 +108,7 @@ func OpenShell(client *ssh.Client, shellCmd string) (*ShellSession, error) {
 	}
 	if err := session.Start(shellCmd); err != nil {
 		session.Close()
-		return nil, fmt.Errorf("arrancar shell: %w", err)
+		return nil, fmt.Errorf("starting shell: %w", err)
 	}
 
 	var b [8]byte
@@ -125,16 +126,16 @@ func OpenShell(client *ssh.Client, shellCmd string) (*ShellSession, error) {
 
 	if _, err := sh.Exec(":", 10*time.Second); err != nil {
 		session.Close()
-		return nil, fmt.Errorf("sincronizar shell: %w", err)
+		return nil, fmt.Errorf("synchronising shell: %w", err)
 	}
 	return sh, nil
 }
 
-// OpenShellPTY arranca un shell con PTY sobre client. shellCmd funciona igual
-// que en OpenShell (p. ej. "sudo -n -- /bin/sh" para elevar).
-// opts controla las dimensiones y el tipo de terminal.
+// OpenShellPTY starts a shell with a PTY over client. shellCmd works the same
+// as in OpenShell (e.g. "sudo -n -- /bin/sh" to elevate).
+// opts controls terminal dimensions and type.
 //
-// En modo PTY stdout y stderr se mezclan; Result.Stderr siempre estará vacío.
+// In PTY mode stdout and stderr are merged; Result.Stderr will always be empty.
 func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*ShellSession, error) {
 	if shellCmd == "" {
 		shellCmd = "/bin/sh"
@@ -142,7 +143,7 @@ func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*Shell
 
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, fmt.Errorf("abrir sesión PTY: %w", err)
+		return nil, fmt.Errorf("opening PTY session: %w", err)
 	}
 
 	term := opts.Term
@@ -158,30 +159,30 @@ func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*Shell
 		cols = 220
 	}
 	modes := ssh.TerminalModes{
-		ssh.ECHO:          0, // deshabilitar eco
+		ssh.ECHO:          0, // disable echo
 		ssh.TTY_OP_ISPEED: 14400,
 		ssh.TTY_OP_OSPEED: 14400,
 	}
 	if err := session.RequestPty(term, int(rows), int(cols), modes); err != nil {
 		session.Close()
-		return nil, fmt.Errorf("solicitar PTY: %w", err)
+		return nil, fmt.Errorf("requesting PTY: %w", err)
 	}
 
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		session.Close()
-		return nil, fmt.Errorf("stdin PTY: %w", err)
+		return nil, fmt.Errorf("PTY stdin: %w", err)
 	}
-	// Con PTY, StdoutPipe y StderrPipe se obtienen en el canal combinado.
+	// With PTY, StdoutPipe and StderrPipe are obtained on the combined channel.
 	stdout, err := session.StdoutPipe()
 	if err != nil {
 		session.Close()
-		return nil, fmt.Errorf("stdout PTY: %w", err)
+		return nil, fmt.Errorf("PTY stdout: %w", err)
 	}
 
 	if err := session.Start(shellCmd); err != nil {
 		session.Close()
-		return nil, fmt.Errorf("arrancar shell PTY: %w", err)
+		return nil, fmt.Errorf("starting PTY shell: %w", err)
 	}
 
 	var b [8]byte
@@ -190,29 +191,30 @@ func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*Shell
 		session: session,
 		stdin:   stdin,
 		lines:   make(chan lineRes),
-		stderr:  nil, // mezclado en stdout con PTY
+		stderr:  nil, // merged into stdout with PTY
 		marker:  "__BRK_" + hex.EncodeToString(b[:]) + "__",
 		pty:     true,
 	}
 	go shellReader(stdout, sh.lines)
 
-	// Silenciar el prompt y asegurarnos de que el eco está off.
+	// Silence the prompt and ensure echo is off.
 	initCmd := "stty -echo 2>/dev/null; PS1=''; PS2=''\n"
 	if _, err := io.WriteString(stdin, initCmd); err != nil {
 		session.Close()
-		return nil, fmt.Errorf("inicializar PTY: %w", err)
+		return nil, fmt.Errorf("initialising PTY: %w", err)
 	}
 
-	// Sincronizar con un no-op para consumir la salida del init.
+	// Synchronise with a no-op to consume the init output.
 	if _, err := sh.Exec(":", 10*time.Second); err != nil {
 		session.Close()
-		return nil, fmt.Errorf("sincronizar shell PTY: %w", err)
+		return nil, fmt.Errorf("synchronising PTY shell: %w", err)
 	}
 	return sh, nil
 }
 
-// shellReader es la goroutine lectora única: lee líneas de stdout y las entrega
-// en orden. Entre comandos queda bloqueada en ReadString (sin salida que perder).
+// shellReader is the single reader goroutine: reads lines from stdout and
+// delivers them in order. Between commands it blocks on ReadString (no output
+// to lose).
 func shellReader(r io.Reader, out chan<- lineRes) {
 	br := bufio.NewReader(r)
 	for {
@@ -224,10 +226,10 @@ func shellReader(r io.Reader, out chan<- lineRes) {
 	}
 }
 
-// Exec ejecuta command y devuelve (stdout, stderr, exit code). timeout acota la
-// espera de la salida.
+// Exec executes command and returns (stdout, stderr, exit code). timeout caps
+// the output wait.
 //
-// En modo PTY Result.Stderr estará vacío (los streams se mezclan en Stdout).
+// In PTY mode Result.Stderr will be empty (streams are merged in Stdout).
 func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -239,7 +241,7 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 
 	line := fmt.Sprintf("%s\nprintf '%%s:%%d\\n' '%s' \"$?\"\n", command, s.marker)
 	if _, err := io.WriteString(s.stdin, line); err != nil {
-		return nil, fmt.Errorf("escribir comando: %w", err)
+		return nil, fmt.Errorf("writing command: %w", err)
 	}
 
 	var out strings.Builder
@@ -247,7 +249,7 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 	for {
 		select {
 		case <-deadline:
-			return nil, fmt.Errorf("timeout esperando salida del comando")
+			return nil, fmt.Errorf("timeout waiting for command output")
 		case lr := <-s.lines:
 			if idx := strings.Index(lr.text, s.marker+":"); idx >= 0 {
 				code, _ := strconv.Atoi(strings.TrimSpace(lr.text[idx+len(s.marker)+1:]))
@@ -262,20 +264,20 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 				}, nil
 			}
 			if lr.text != "" {
-				// A3: limitar la acumulación de stdout para evitar OOM.
+				// A3: limit stdout accumulation to prevent OOM.
 				if out.Len()+len(lr.text) > maxOutputBytes {
-					return nil, fmt.Errorf("salida del comando supera el límite de %d bytes", maxOutputBytes)
+					return nil, fmt.Errorf("command output exceeds limit of %d bytes", maxOutputBytes)
 				}
 				out.WriteString(lr.text)
 			}
 			if lr.err != nil {
-				return nil, fmt.Errorf("lectura interrumpida: %w", lr.err)
+				return nil, fmt.Errorf("read interrupted: %w", lr.err)
 			}
 		}
 	}
 }
 
-// Close cierra el shell.
+// Close closes the shell.
 func (s *ShellSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

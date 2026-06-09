@@ -1,7 +1,7 @@
-// Package auth construye la configuración TLS del broker: exige certificado de
-// cliente (mTLS) firmado por una CA de confianza. Así solo agentes autorizados
-// pueden pedir ejecuciones, y el CN del cliente queda asociado a cada entrada de
-// auditoría (no repudio del llamante).
+// Package auth builds the TLS configuration for the broker: it requires a
+// client certificate (mTLS) signed by a trusted CA. This ensures only
+// authorised agents can request executions, and the client CN is associated
+// with each audit entry (caller non-repudiation).
 package auth
 
 import (
@@ -12,20 +12,20 @@ import (
 	"os"
 )
 
-// ServerTLSConfig devuelve un *tls.Config que exige mTLS con clientes firmados
-// por clientCAFile, presentando el par (serverCertFile, serverKeyFile).
+// ServerTLSConfig returns a *tls.Config that requires mTLS with clients signed
+// by clientCAFile, presenting the (serverCertFile, serverKeyFile) pair.
 func ServerTLSConfig(serverCertFile, serverKeyFile, clientCAFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(serverCertFile, serverKeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("cargar cert de servidor: %w", err)
+		return nil, fmt.Errorf("loading server cert: %w", err)
 	}
 	caPEM, err := os.ReadFile(clientCAFile)
 	if err != nil {
-		return nil, fmt.Errorf("leer CA de clientes: %w", err)
+		return nil, fmt.Errorf("reading client CA: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("CA de clientes inválida: %s", clientCAFile)
+		return nil, fmt.Errorf("invalid client CA: %s", clientCAFile)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -35,14 +35,14 @@ func ServerTLSConfig(serverCertFile, serverKeyFile, clientCAFile string) (*tls.C
 	}, nil
 }
 
-// ServerTLSConfigNoClientAuth devuelve un *tls.Config para un servidor HTTPS que
-// presenta (serverCertFile, serverKeyFile) pero NO exige certificado de cliente.
-// Lo usa el frontend MCP sobre HTTP+OAuth: la autenticación del llamante la aporta
-// el bearer token (OIDC), no mTLS.
+// ServerTLSConfigNoClientAuth returns a *tls.Config for an HTTPS server that
+// presents (serverCertFile, serverKeyFile) but does NOT require a client
+// certificate. Used by the HTTP+OAuth MCP frontend: caller authentication is
+// provided by the bearer token (OIDC), not mTLS.
 func ServerTLSConfigNoClientAuth(serverCertFile, serverKeyFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(serverCertFile, serverKeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("cargar cert de servidor: %w", err)
+		return nil, fmt.Errorf("loading server cert: %w", err)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -50,21 +50,21 @@ func ServerTLSConfigNoClientAuth(serverCertFile, serverKeyFile string) (*tls.Con
 	}, nil
 }
 
-// ClientTLSConfig construye la config TLS de un cliente mTLS: presenta
-// (certFile, keyFile) y verifica al servidor contra serverCAFile. La usa el
-// broker para hablar con el servicio de firma.
+// ClientTLSConfig builds the TLS config for an mTLS client: presents
+// (certFile, keyFile) and verifies the server against serverCAFile. Used by
+// the broker to talk to the signing service.
 func ClientTLSConfig(certFile, keyFile, serverCAFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("cargar cert de cliente: %w", err)
+		return nil, fmt.Errorf("loading client cert: %w", err)
 	}
 	caPEM, err := os.ReadFile(serverCAFile)
 	if err != nil {
-		return nil, fmt.Errorf("leer CA del servidor: %w", err)
+		return nil, fmt.Errorf("reading server CA: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("CA del servidor inválida: %s", serverCAFile)
+		return nil, fmt.Errorf("invalid server CA: %s", serverCAFile)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -73,11 +73,12 @@ func ClientTLSConfig(certFile, keyFile, serverCAFile string) (*tls.Config, error
 	}, nil
 }
 
-// CallerCN extrae el Common Name del certificado de cliente verificado.
-// Asume que el TLS handshake ya validó la cadena (RequireAndVerifyClientCert).
+// CallerCN extracts the Common Name from the verified client certificate.
+// Assumes the TLS handshake has already validated the chain
+// (RequireAndVerifyClientCert).
 func CallerCN(r *http.Request) (string, error) {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		return "", fmt.Errorf("sin certificado de cliente")
+		return "", fmt.Errorf("no client certificate")
 	}
 	return r.TLS.PeerCertificates[0].Subject.CommonName, nil
 }

@@ -1,6 +1,6 @@
-// Package ssh abre la conexión al host (directa o a través de uno o varios
-// bastiones) usando certificados efímeros y ejecuta comandos. Es el único punto
-// donde existe el material de la credencial.
+// Package ssh opens the connection to the host (direct or through one or more
+// bastions) using ephemeral certificates and executes commands. It is the only
+// point in the system where credential material exists.
 package ssh
 
 import (
@@ -14,19 +14,19 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Límites de A3: timeout de ejecución y tamaño máximo de salida.
+// A3 limits: execution timeout and maximum output size.
 const (
-	// defaultExecTimeout acota la espera de un comando SSH de un disparo.
-	// Evita que sesión.Run() se bloquee indefinidamente.
+	// defaultExecTimeout caps the wait for a one-shot SSH command.
+	// Prevents session.Run() from blocking indefinitely.
 	defaultExecTimeout = 10 * time.Minute
-	// maxOutputBytes es el tamaño máximo del buffer de salida por stream
-	// (stdout o stderr). Evita OOM ante salidas de tamaño arbitrario.
+	// maxOutputBytes is the maximum output buffer size per stream
+	// (stdout or stderr). Prevents OOM from arbitrarily large output.
 	maxOutputBytes = 10 * 1024 * 1024 // 10 MiB
 )
 
-// limitedWriter escribe en un bytes.Buffer interno hasta un máximo de max bytes.
-// Cuando se supera el límite, las escrituras adicionales devuelven error para que
-// el canal SSH deje de acumular datos.
+// limitedWriter writes to an internal bytes.Buffer up to max bytes. When the
+// limit is exceeded, further writes return an error so the SSH channel stops
+// accumulating data.
 type limitedWriter struct {
 	buf   bytes.Buffer
 	max   int
@@ -35,7 +35,7 @@ type limitedWriter struct {
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
 	if lw.total >= lw.max {
-		return 0, fmt.Errorf("salida truncada: límite de %d bytes superado", lw.max)
+		return 0, fmt.Errorf("output truncated: limit of %d bytes exceeded", lw.max)
 	}
 	rem := lw.max - lw.total
 	if len(p) > rem {
@@ -46,25 +46,26 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// Hop es un salto de la cadena de conexión (bastión o destino final). El primer
-// hop se alcanza por TCP directo; los siguientes a través del canal del anterior.
+// Hop is one step in the connection chain (bastion or final target). The first
+// hop is reached by direct TCP; subsequent hops go through the previous hop's
+// channel.
 type Hop struct {
 	Addr    string
 	User    string
 	HostKey ssh.PublicKey
-	// PrivateKey + Certificate forman el signer del cert efímero de este hop.
+	// PrivateKey + Certificate form the signer for this hop's ephemeral cert.
 	PrivateKey  ed25519.PrivateKey
 	Certificate *ssh.Certificate
 }
 
-// Conn envuelve el cliente SSH al destino final y mantiene los clientes
-// intermedios para cerrarlos en orden inverso.
+// Conn wraps the SSH client to the final target and keeps intermediate clients
+// so they can be closed in reverse order.
 type Conn struct {
 	Client  *ssh.Client
 	closers []io.Closer
 }
 
-// Close cierra el cliente final y la cadena de intermedios.
+// Close closes the final client and the chain of intermediaries.
 func (c *Conn) Close() error {
 	var firstErr error
 	if err := c.Client.Close(); err != nil {
@@ -78,7 +79,7 @@ func (c *Conn) Close() error {
 	return firstErr
 }
 
-// Target describe el destino de un Run de un disparo (sin saltos).
+// Target describes the destination for a one-shot Run (single hop, no bastion).
 type Target struct {
 	Addr           string
 	User           string
@@ -86,7 +87,7 @@ type Target struct {
 	ConnectTimeout time.Duration
 }
 
-// Result es la salida capturada de la ejecución.
+// Result is the captured output of an execution.
 type Result struct {
 	Stdout   string
 	Stderr   string
@@ -95,15 +96,15 @@ type Result struct {
 
 func hopClientConfig(h Hop, timeout time.Duration) (*ssh.ClientConfig, error) {
 	if h.HostKey == nil {
-		return nil, fmt.Errorf("host key de %s es obligatoria (no aceptar ciegamente)", h.Addr)
+		return nil, fmt.Errorf("host key for %s is required (do not accept blindly)", h.Addr)
 	}
 	keySigner, err := ssh.NewSignerFromKey(h.PrivateKey)
 	if err != nil {
-		return nil, fmt.Errorf("signer de clave efímera (%s): %w", h.Addr, err)
+		return nil, fmt.Errorf("ephemeral key signer (%s): %w", h.Addr, err)
 	}
 	certSigner, err := ssh.NewCertSigner(h.Certificate, keySigner)
 	if err != nil {
-		return nil, fmt.Errorf("signer de certificado (%s): %w", h.Addr, err)
+		return nil, fmt.Errorf("certificate signer (%s): %w", h.Addr, err)
 	}
 	return &ssh.ClientConfig{
 		User:              h.User,
@@ -114,11 +115,11 @@ func hopClientConfig(h Hop, timeout time.Duration) (*ssh.ClientConfig, error) {
 	}, nil
 }
 
-// Dial establece la cadena de conexión. hops[0] es el primer salto (o el destino
-// si no hay bastión); el último hop es el destino final.
+// Dial establishes the connection chain. hops[0] is the first hop (or the
+// target if there is no bastion); the last hop is the final target.
 func Dial(hops []Hop, timeout time.Duration) (*Conn, error) {
 	if len(hops) == 0 {
-		return nil, fmt.Errorf("se requiere al menos un hop")
+		return nil, fmt.Errorf("at least one hop is required")
 	}
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -130,7 +131,7 @@ func Dial(hops []Hop, timeout time.Duration) (*Conn, error) {
 	}
 	tcp, err := net.DialTimeout("tcp", hops[0].Addr, timeout)
 	if err != nil {
-		return nil, fmt.Errorf("conectar a %s: %w", hops[0].Addr, err)
+		return nil, fmt.Errorf("connecting to %s: %w", hops[0].Addr, err)
 	}
 	c0, chans, reqs, err := ssh.NewClientConn(tcp, hops[0].Addr, cfg0)
 	if err != nil {
@@ -146,19 +147,19 @@ func Dial(hops []Hop, timeout time.Duration) (*Conn, error) {
 			conn.closeAll()
 			return nil, err
 		}
-		// Canal direct-tcpip a través del salto anterior.
+		// direct-tcpip channel through the previous hop.
 		nc, err := current.Dial("tcp", hops[i].Addr)
 		if err != nil {
 			conn.closeAll()
-			return nil, fmt.Errorf("salto a %s: %w", hops[i].Addr, err)
+			return nil, fmt.Errorf("hop to %s: %w", hops[i].Addr, err)
 		}
 		cc, chans, reqs, err := ssh.NewClientConn(nc, hops[i].Addr, cfg)
 		if err != nil {
 			nc.Close()
 			conn.closeAll()
-			return nil, fmt.Errorf("handshake %s (vía bastión): %w", hops[i].Addr, err)
+			return nil, fmt.Errorf("handshake %s (via bastion): %w", hops[i].Addr, err)
 		}
-		// El cliente anterior pasa a ser intermedio (a cerrar al final).
+		// The previous client becomes an intermediate (to be closed at the end).
 		conn.closers = append(conn.closers, current)
 		current = ssh.NewClient(cc, chans, reqs)
 		conn.Client = current
@@ -173,33 +174,33 @@ func (c *Conn) closeAll() {
 	}
 }
 
-// ExecOptions controla opciones opcionales de ejecución de un comando remoto.
+// ExecOptions controls optional parameters for a remote command execution.
 type ExecOptions struct {
-	// PTY solicita un pseudo-terminal antes de ejecutar el comando. Útil para
-	// programas que comprueban isatty() o que requieren un TTY real.
-	// Nota: con PTY los streams stdout y stderr se mezclan en Result.Stdout;
-	// Result.Stderr quedará vacío.
+	// PTY requests a pseudo-terminal before executing the command. Useful for
+	// programs that check isatty() or require a real TTY.
+	// Note: with PTY, stdout and stderr are merged in Result.Stdout;
+	// Result.Stderr will be empty.
 	PTY bool
-	// Term es el tipo de terminal a anunciar (default "xterm-256color").
+	// Term is the terminal type to announce (default "xterm-256color").
 	Term string
-	// Rows y Cols son las dimensiones del PTY (default 40×220).
+	// Rows and Cols are the PTY dimensions (default 40×220).
 	Rows uint32
 	Cols uint32
-	// Timeout acota la espera del comando remoto (A3). 0 = defaultExecTimeout.
+	// Timeout caps the remote command wait (A3). 0 = defaultExecTimeout.
 	Timeout time.Duration
 }
 
-// defaultPTYTerm es el tipo de terminal por defecto.
+// defaultPTYTerm is the default terminal type.
 const defaultPTYTerm = "xterm-256color"
 
-// ExecOnce abre un canal exec sobre conn, ejecuta command y captura la salida.
-// Si opts.PTY es true solicita un PTY antes de ejecutar; los streams se mezclan.
-// A3: la ejecución está acotada por opts.Timeout (o defaultExecTimeout si es 0)
-// y la salida se limita a maxOutputBytes por stream para evitar OOM.
+// ExecOnce opens an exec channel over conn, runs command, and captures the
+// output. If opts.PTY is true a PTY is requested first; streams are merged.
+// A3: execution is bounded by opts.Timeout (or defaultExecTimeout when 0) and
+// output is limited to maxOutputBytes per stream to prevent OOM.
 func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result, error) {
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, fmt.Errorf("abrir sesión: %w", err)
+		return nil, fmt.Errorf("opening session: %w", err)
 	}
 	defer session.Close()
 
@@ -228,19 +229,19 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 			cols = 220
 		}
 		modes := ssh.TerminalModes{
-			ssh.ECHO:          0, // sin eco
+			ssh.ECHO:          0, // no echo
 			ssh.TTY_OP_ISPEED: 14400,
 			ssh.TTY_OP_OSPEED: 14400,
 		}
 		if err := session.RequestPty(term, int(rows), int(cols), modes); err != nil {
-			return nil, fmt.Errorf("solicitar PTY: %w", err)
+			return nil, fmt.Errorf("requesting PTY: %w", err)
 		}
-		// Con PTY stdout y stderr se mezclan en el canal stdout del PTY.
+		// With PTY, stdout and stderr are merged in the PTY stdout channel.
 		var combined limitedWriter
 		combined.max = maxOutputBytes
 		session.Stdout = &combined
 
-		// A3: correr session.Run en goroutine para poder acotar el tiempo.
+		// A3: run session.Run in a goroutine to be able to cap the time.
 		type runRes struct{ err error }
 		done := make(chan runRes, 1)
 		go func() { done <- runRes{err: session.Run(command)} }()
@@ -253,11 +254,11 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 					res.ExitCode = exitErr.ExitStatus()
 					return res, nil
 				}
-				return res, fmt.Errorf("ejecutar comando (pty): %w", r.err)
+				return res, fmt.Errorf("executing command (pty): %w", r.err)
 			}
 		case <-time.After(execTimeout):
 			_ = session.Signal(ssh.SIGTERM)
-			return nil, fmt.Errorf("timeout de ejecución SSH (límite: %v)", execTimeout)
+			return nil, fmt.Errorf("SSH execution timeout (limit: %v)", execTimeout)
 		}
 		return res, nil
 	}
@@ -268,7 +269,7 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 
-	// A3: correr session.Run en goroutine para poder acotar el tiempo.
+	// A3: run session.Run in a goroutine to be able to cap the time.
 	type runRes struct{ err error }
 	done := make(chan runRes, 1)
 	go func() { done <- runRes{err: session.Run(command)} }()
@@ -282,16 +283,16 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 				res.ExitCode = exitErr.ExitStatus()
 				return res, nil
 			}
-			return res, fmt.Errorf("ejecutar comando: %w", r.err)
+			return res, fmt.Errorf("executing command: %w", r.err)
 		}
 	case <-time.After(execTimeout):
 		_ = session.Signal(ssh.SIGTERM)
-		return nil, fmt.Errorf("timeout de ejecución SSH (límite: %v)", execTimeout)
+		return nil, fmt.Errorf("SSH execution timeout (limit: %v)", execTimeout)
 	}
 	return res, nil
 }
 
-// Run conecta de un disparo (un solo hop, el destino) y ejecuta command.
+// Run connects in a single shot (one hop, the target) and executes command.
 func Run(priv ed25519.PrivateKey, cert *ssh.Certificate, t Target, command string) (*Result, error) {
 	conn, err := Dial([]Hop{{
 		Addr: t.Addr, User: t.User, HostKey: t.HostKey,

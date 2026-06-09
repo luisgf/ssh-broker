@@ -13,68 +13,71 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// WireRequest es el cuerpo de POST /v1/sign. No incluye Caller: el servicio lo
-// deriva del certificado de cliente mTLS (no es asertable por el broker).
+// WireRequest is the body of POST /v1/sign. It does not include Caller: the
+// service derives it from the mTLS client certificate (not assertable by the
+// broker).
 type WireRequest struct {
 	Host       string `json:"host"`
 	Role       string `json:"role"`
 	Purpose    string `json:"purpose"`
 	Command    string `json:"command,omitempty"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
-	PublicKey  string `json:"public_key"` // línea authorized_keys de la pubkey efímera
+	PublicKey  string `json:"public_key"` // authorized_keys line of the ephemeral pubkey
 
-	// Elevación (sudo NOPASSWD).
+	// Elevation (sudo NOPASSWD).
 	Sudo     bool   `json:"sudo,omitempty"`
-	SudoUser string `json:"sudo_user,omitempty"` // vacío = root
+	SudoUser string `json:"sudo_user,omitempty"` // empty = root
 
-	// PTY: solicita permit-pty en el certificado.
+	// PTY: requests permit-pty in the certificate.
 	PTY bool `json:"pty,omitempty"`
 
-	// DryRun: resuelve la política y devuelve la decisión sin emitir cert usable.
+	// DryRun: resolves the policy and returns the decision without issuing a
+	// usable cert.
 	DryRun bool `json:"dry_run,omitempty"`
 
-	// OnBehalfOf: CN del broker en cuyo nombre actúa un forwarder de confianza
-	// (control plane). El signer lo honra solo si el CN mTLS está en trusted_forwarders.
+	// OnBehalfOf: CN of the broker on whose behalf a trusted forwarder (control
+	// plane) is acting. The signer honours this only if the mTLS CN is in
+	// trusted_forwarders.
 	OnBehalfOf string `json:"on_behalf_of,omitempty"`
 
-	// Approved: la operación (que requiere aprobación) ya fue aprobada. Honrado solo
-	// desde un forwarder de confianza.
+	// Approved: the operation (which requires approval) has already been approved.
+	// Honoured only from a trusted forwarder.
 	Approved bool `json:"approved,omitempty"`
 
-	// Identidad del usuario final, aseverada por el broker (autenticado por mTLS).
-	// EndUser alimenta la trazabilidad; EndUserGroups, si no es nil, activa el RBAC
-	// por usuario en el signer.
+	// End-user identity, asserted by the broker (authenticated via mTLS).
+	// EndUser feeds traceability; EndUserGroups, if non-nil, activates per-user
+	// RBAC in the signer.
 	EndUser       string   `json:"end_user,omitempty"`
 	EndUserGroups []string `json:"end_user_groups,omitempty"`
 }
 
-// WireResponse es la respuesta del servicio a /v1/sign.
+// WireResponse is the service response to /v1/sign.
 type WireResponse struct {
-	Certificate string `json:"certificate,omitempty"` // línea authorized_keys del cert (vacío en dry-run)
+	Certificate string `json:"certificate,omitempty"` // authorized_keys line of the cert (empty in dry-run)
 	Serial      uint64 `json:"serial,omitempty"`
-	// ElevationPrefix es el prefijo a anteponer en sesiones persistentes.
-	// Vacío en one-shot (el prefijo ya está en el force-command del cert).
+	// ElevationPrefix is the prefix to prepend in persistent sessions.
+	// Empty in one-shot (the prefix is already in the cert's force-command).
 	ElevationPrefix string `json:"elevation_prefix,omitempty"`
-	// Decision se rellena en dry-run (Certificate vacío) y, opcionalmente, en
-	// emisión normal para trazabilidad.
+	// Decision is populated in dry-run (empty Certificate) and optionally in
+	// normal issuance for traceability.
 	Decision *DecisionInfo `json:"decision,omitempty"`
 }
 
-// WireHostInfo contiene los datos de conectividad y capacidades de un host,
-// tal como los devuelve GET /v1/hosts. No incluye datos de política internos
-// (principal, source_address, etc.) — esos son exclusivos del signer.
+// WireHostInfo contains the connectivity and capability data for a host as
+// returned by GET /v1/hosts. It does not include internal policy data
+// (principal, source_address, etc.) — those remain exclusive to the signer.
 type WireHostInfo struct {
 	Addr    string `json:"addr"`
 	User    string `json:"user"`
 	HostKey string `json:"host_key"`
 	Jump    string `json:"jump,omitempty"`
-	// Capacidades: indica al broker (y al modelo) qué operaciones están permitidas.
+	// Capabilities: tells the broker (and the model) which operations are allowed.
 	AllowSudo bool `json:"allow_sudo,omitempty"`
 	AllowPTY  bool `json:"allow_pty,omitempty"`
 }
 
-// HostInfo es la representación interna del broker de los datos de
-// conectividad y capacidades recibidos del signer.
+// HostInfo is the broker's internal representation of connectivity and
+// capability data received from the signer.
 type HostInfo struct {
 	Addr      string
 	User      string
@@ -84,17 +87,17 @@ type HostInfo struct {
 	AllowPTY  bool
 }
 
-// Remote delega la firma en el servicio externo por HTTP+mTLS. Sirve tanto para
-// hablar con el signer directamente como con el control plane (mismo protocolo);
-// en este último caso una respuesta 202 indica que la operación quedó pendiente de
-// aprobación humana y se hace polling hasta resolverla.
+// Remote delegates signing to the external service via HTTP+mTLS. It can talk
+// to the signer directly or to the control plane (same protocol); in the latter
+// case a 202 response indicates that the operation is pending human approval and
+// the client polls until it is resolved.
 type Remote struct {
 	client       *http.Client
 	url          string
-	approvalWait time.Duration // tiempo máximo de espera ante un 202 (0 = no esperar)
+	approvalWait time.Duration // maximum wait time on a 202 (0 = do not wait)
 }
 
-// NewRemote crea un cliente del servicio de firma.
+// NewRemote creates a client for the signing service.
 func NewRemote(url string, tlsCfg *tls.Config, timeout time.Duration) *Remote {
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -105,12 +108,12 @@ func NewRemote(url string, tlsCfg *tls.Config, timeout time.Duration) *Remote {
 	}
 }
 
-// SetApprovalWait fija cuánto espera el cliente a que se resuelva una aprobación
-// humana (respuesta 202 del control plane). 0 = no esperar (un 202 se traduce en
-// error inmediato).
+// SetApprovalWait sets how long the client waits for a human approval to be
+// resolved (202 response from the control plane). 0 = do not wait (a 202
+// translates to an immediate error).
 func (r *Remote) SetApprovalWait(d time.Duration) { r.approvalWait = d }
 
-// SignIntent implementa Signer contra el servicio remoto.
+// SignIntent implements Signer against the remote service.
 func (r *Remote) SignIntent(ctx context.Context, in Intent) (*Issued, error) {
 	body, err := json.Marshal(WireRequest{
 		Host:          in.Host,
@@ -133,38 +136,38 @@ func (r *Remote) SignIntent(ctx context.Context, in Intent) (*Issued, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.url+"/v1/sign", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("construir petición /v1/sign: %w", err)
+		return nil, fmt.Errorf("building /v1/sign request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("contactar servicio de firma: %w", err)
+		return nil, fmt.Errorf("contacting signing service: %w", err)
 	}
 	defer resp.Body.Close()
-	// A2: limitar la lectura de /v1/sign para evitar OOM por respuestas gigantes.
+	// A2: limit the read from /v1/sign to prevent OOM from oversized responses.
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 	if err != nil {
-		return nil, fmt.Errorf("leer respuesta de /v1/sign: %w", err)
+		return nil, fmt.Errorf("reading /v1/sign response: %w", err)
 	}
-	// 202: la operación requiere aprobación humana (control plane). Hacer polling.
+	// 202: operation requires human approval (control plane). Poll for result.
 	if resp.StatusCode == http.StatusAccepted {
 		var acc struct {
 			ApprovalID string `json:"approval_id"`
 		}
 		if err := json.Unmarshal(rb, &acc); err != nil || acc.ApprovalID == "" {
-			return nil, fmt.Errorf("respuesta 202 inválida del control plane")
+			return nil, fmt.Errorf("invalid 202 response from control plane")
 		}
 		return r.pollApproval(ctx, acc.ApprovalID)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("firma rechazada (%d): %s", resp.StatusCode, bytes.TrimSpace(rb))
+		return nil, fmt.Errorf("signing rejected (%d): %s", resp.StatusCode, bytes.TrimSpace(rb))
 	}
 
 	var wr WireResponse
 	if err := json.Unmarshal(rb, &wr); err != nil {
-		return nil, fmt.Errorf("respuesta inválida: %w", err)
+		return nil, fmt.Errorf("invalid response: %w", err)
 	}
-	// Dry-run, o respuesta sin certificado (requiere aprobación): solo la decisión.
+	// Dry-run, or response without certificate (requires approval): decision only.
 	if in.DryRun || wr.Certificate == "" {
 		return &Issued{Decision: wr.Decision}, nil
 	}
@@ -175,16 +178,16 @@ func (r *Remote) SignIntent(ctx context.Context, in Intent) (*Issued, error) {
 	return &Issued{Certificate: cert, Serial: wr.Serial, ElevationPrefix: wr.ElevationPrefix, Decision: wr.Decision}, nil
 }
 
-// HeaderOnBehalfOf transporta el CN del broker en peticiones GET (sin cuerpo) que
-// un forwarder de confianza (control plane) hace en su nombre.
+// HeaderOnBehalfOf carries the broker CN in GET requests (no body) that a
+// trusted forwarder (control plane) makes on its behalf.
 const HeaderOnBehalfOf = "X-On-Behalf-Of"
 
-// pollApproval consulta GET /v1/sign/result/{id} hasta que la solicitud se
-// resuelve (cert emitido tras aprobación), se deniega/expira, o se agota
-// approvalWait. Cada poll es una petición corta; el intervalo entre polls es fijo.
+// pollApproval queries GET /v1/sign/result/{id} until the request is resolved
+// (cert issued after approval), denied/expired, or approvalWait is exhausted.
+// Each poll is a short request; the interval between polls is fixed.
 func (r *Remote) pollApproval(ctx context.Context, approvalID string) (*Issued, error) {
 	if r.approvalWait <= 0 {
-		return nil, fmt.Errorf("la operación requiere aprobación humana (id %s); el cliente no está configurado para esperar", approvalID)
+		return nil, fmt.Errorf("operation requires human approval (id %s); client is not configured to wait", approvalID)
 	}
 	const interval = 2 * time.Second
 	deadline := time.Now().Add(r.approvalWait)
@@ -195,25 +198,25 @@ func (r *Remote) pollApproval(ctx context.Context, approvalID string) (*Issued, 
 		case <-time.After(interval):
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("aprobación no concedida dentro del plazo (id %s)", approvalID)
+			return nil, fmt.Errorf("approval not granted within deadline (id %s)", approvalID)
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url+"/v1/sign/result/"+approvalID, nil)
 		if err != nil {
-			return nil, fmt.Errorf("construir petición de poll: %w", err)
+			return nil, fmt.Errorf("building poll request: %w", err)
 		}
 		resp, err := r.client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("consultar resultado de aprobación: %w", err)
+			return nil, fmt.Errorf("querying approval result: %w", err)
 		}
 		rb, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusAccepted:
-			continue // sigue pendiente
+			continue // still pending
 		case http.StatusOK:
 			var wr WireResponse
 			if err := json.Unmarshal(rb, &wr); err != nil {
-				return nil, fmt.Errorf("respuesta de aprobación inválida: %w", err)
+				return nil, fmt.Errorf("invalid approval response: %w", err)
 			}
 			cert, err := ParseCertificate(wr.Certificate)
 			if err != nil {
@@ -221,43 +224,43 @@ func (r *Remote) pollApproval(ctx context.Context, approvalID string) (*Issued, 
 			}
 			return &Issued{Certificate: cert, Serial: wr.Serial, ElevationPrefix: wr.ElevationPrefix, Decision: wr.Decision}, nil
 		default:
-			return nil, fmt.Errorf("aprobación no concedida (%d): %s", resp.StatusCode, bytes.TrimSpace(rb))
+			return nil, fmt.Errorf("approval not granted (%d): %s", resp.StatusCode, bytes.TrimSpace(rb))
 		}
 	}
 }
 
-// FetchHosts llama a GET /v1/hosts en el signer y devuelve los datos de
-// conectividad de todos los hosts configurados. El broker usa esta información
-// para construir los hops SSH; la política de firma permanece en el signer.
+// FetchHosts calls GET /v1/hosts on the signer and returns the connectivity
+// data for all configured hosts. The broker uses this to build SSH hops; the
+// signing policy remains in the signer.
 //
-// onBehalfOf, si no es vacío, se envía en la cabecera X-On-Behalf-Of para que el
-// signer filtre los hosts por los grupos del broker original (uso del control
-// plane). El broker pasa "" (actúa en su propio nombre).
+// onBehalfOf, if non-empty, is sent in the X-On-Behalf-Of header so that the
+// signer filters hosts by the original broker's groups (control plane use case).
+// The broker passes "" (acting on its own behalf).
 func (r *Remote) FetchHosts(ctx context.Context, onBehalfOf string) (map[string]HostInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.url+"/v1/hosts", nil)
 	if err != nil {
-		return nil, fmt.Errorf("construir petición /v1/hosts: %w", err)
+		return nil, fmt.Errorf("building /v1/hosts request: %w", err)
 	}
 	if onBehalfOf != "" {
 		req.Header.Set(HeaderOnBehalfOf, onBehalfOf)
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("obtener lista de hosts: %w", err)
+		return nil, fmt.Errorf("fetching host list: %w", err)
 	}
 	defer resp.Body.Close()
-	// A2: limitar la lectura de /v1/hosts para evitar OOM por respuestas gigantes.
+	// A2: limit the read from /v1/hosts to prevent OOM from oversized responses.
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 	if err != nil {
-		return nil, fmt.Errorf("leer respuesta de /v1/hosts: %w", err)
+		return nil, fmt.Errorf("reading /v1/hosts response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("signer devolvió %d: %s", resp.StatusCode, bytes.TrimSpace(rb))
+		return nil, fmt.Errorf("signer returned %d: %s", resp.StatusCode, bytes.TrimSpace(rb))
 	}
 
 	var wire map[string]WireHostInfo
 	if err := json.Unmarshal(rb, &wire); err != nil {
-		return nil, fmt.Errorf("respuesta /v1/hosts inválida: %w", err)
+		return nil, fmt.Errorf("invalid /v1/hosts response: %w", err)
 	}
 
 	hosts := make(map[string]HostInfo, len(wire))
@@ -274,24 +277,24 @@ func (r *Remote) FetchHosts(ctx context.Context, onBehalfOf string) (map[string]
 	return hosts, nil
 }
 
-// ParseCertificate convierte una línea authorized_keys en *ssh.Certificate.
+// ParseCertificate converts an authorized_keys line into an *ssh.Certificate.
 func ParseCertificate(authorizedLine string) (*ssh.Certificate, error) {
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedLine))
 	if err != nil {
-		return nil, fmt.Errorf("parsear certificado: %w", err)
+		return nil, fmt.Errorf("parsing certificate: %w", err)
 	}
 	cert, ok := pk.(*ssh.Certificate)
 	if !ok {
-		return nil, fmt.Errorf("la clave devuelta no es un certificado")
+		return nil, fmt.Errorf("returned key is not a certificate")
 	}
 	return cert, nil
 }
 
-// ParsePublicKey convierte una línea authorized_keys en ssh.PublicKey.
+// ParsePublicKey converts an authorized_keys line into an ssh.PublicKey.
 func ParsePublicKey(authorizedLine string) (ssh.PublicKey, error) {
 	pk, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorizedLine))
 	if err != nil {
-		return nil, fmt.Errorf("parsear pubkey: %w", err)
+		return nil, fmt.Errorf("parsing pubkey: %w", err)
 	}
 	return pk, nil
 }

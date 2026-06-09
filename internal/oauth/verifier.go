@@ -1,7 +1,8 @@
-// Package oauth implementa la validación de tokens bearer OIDC para el frontend
-// MCP sobre HTTP (cmd/mcp-broker-http). Delega en github.com/coreos/go-oidc, que
-// descubre el issuer, descarga y cachea el JWKS (con rotación de claves) y valida
-// firma, iss, aud y exp del JWT localmente, sin round-trip por petición.
+// Package oauth implements bearer OIDC token validation for the HTTP MCP
+// frontend (cmd/mcp-broker-http). It delegates to github.com/coreos/go-oidc,
+// which discovers the issuer, downloads and caches the JWKS (with key
+// rotation), and validates the JWT signature, iss, aud, and exp locally —
+// no round-trip per request.
 package oauth
 
 import (
@@ -16,43 +17,43 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/auth"
 )
 
-// Config configura el verificador OIDC.
+// Config configures the OIDC verifier.
 type Config struct {
-	Issuer         string   // URL del proveedor OIDC (descubrimiento automático)
-	Audience       string   // valor esperado del claim aud (este resource server)
-	RequiredScopes []string // scopes exigidos (los comprueba el middleware del SDK)
-	UserClaim      string   // claim de identidad; default "sub"
-	GroupsClaim    string   // claim de grupos/roles a propagar; opcional
-	// MaxTokenAge es la antigüedad máxima aceptable del token desde su emisión
-	// (claim iat). 0 = sin límite. Limitar a 1–2 horas reduce el riesgo de
-	// replay de tokens filtrados dentro de su ventana exp (M3).
+	Issuer         string   // OIDC provider URL (auto-discovery)
+	Audience       string   // expected value of the aud claim (this resource server)
+	RequiredScopes []string // required scopes (checked by the SDK middleware)
+	UserClaim      string   // identity claim; default "sub"
+	GroupsClaim    string   // groups/roles claim to propagate; optional
+	// MaxTokenAge is the maximum acceptable age of the token since issuance
+	// (iat claim). 0 = no limit. Limiting to 1–2 hours reduces the replay risk
+	// of leaked tokens within their exp window (M3).
 	MaxTokenAge time.Duration
 }
 
-// Verifier valida tokens y extrae la identidad y los grupos del usuario.
+// Verifier validates tokens and extracts the user identity and groups.
 type Verifier struct {
 	verifier    *oidc.IDTokenVerifier
 	userClaim   string
 	groupsClaim string
-	maxTokenAge time.Duration // M3: 0 = sin límite
+	maxTokenAge time.Duration // M3: 0 = no limit
 }
 
-// ExtraGroupsKey es la clave bajo la que Verify guarda los grupos del usuario en
-// TokenInfo.Extra, para que el frontend los propague al signer.
+// ExtraGroupsKey is the key under which Verify stores the user's groups in
+// TokenInfo.Extra, so the frontend can propagate them to the signer.
 const ExtraGroupsKey = "groups"
 
-// NewVerifier descubre el issuer y construye el verificador. La gestión del JWKS
-// (descarga, cache y rotación) corre a cargo de go-oidc.
+// NewVerifier discovers the issuer and constructs the verifier. JWKS management
+// (download, cache, and rotation) is handled by go-oidc.
 func NewVerifier(ctx context.Context, cfg Config) (*Verifier, error) {
 	if cfg.Issuer == "" {
-		return nil, fmt.Errorf("oauth: issuer obligatorio")
+		return nil, fmt.Errorf("oauth: issuer is required")
 	}
 	if cfg.Audience == "" {
-		return nil, fmt.Errorf("oauth: audience obligatorio")
+		return nil, fmt.Errorf("oauth: audience is required")
 	}
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
-		return nil, fmt.Errorf("oauth: descubrimiento OIDC: %w", err)
+		return nil, fmt.Errorf("oauth: OIDC discovery: %w", err)
 	}
 	userClaim := cfg.UserClaim
 	if userClaim == "" {
@@ -66,9 +67,9 @@ func NewVerifier(ctx context.Context, cfg Config) (*Verifier, error) {
 	}, nil
 }
 
-// Verify implementa auth.TokenVerifier: valida el token y devuelve su TokenInfo.
-// Los errores de validación se envuelven en auth.ErrInvalidToken para que el
-// middleware responda 401.
+// Verify implements auth.TokenVerifier: validates the token and returns its
+// TokenInfo. Validation errors are wrapped in auth.ErrInvalidToken so the
+// middleware responds with 401.
 func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 	idToken, err := v.verifier.Verify(ctx, token)
 	if err != nil {
@@ -77,7 +78,7 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 
 	var claims map[string]any
 	if err := idToken.Claims(&claims); err != nil {
-		return nil, fmt.Errorf("%w: claims ilegibles: %v", auth.ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: unreadable claims: %v", auth.ErrInvalidToken, err)
 	}
 
 	ti := &auth.TokenInfo{
@@ -86,16 +87,16 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 		UserID:     stringClaim(claims, v.userClaim),
 	}
 	if ti.UserID == "" {
-		// Sin identidad utilizable no podemos auditar ni aplicar RBAC.
-		return nil, fmt.Errorf("%w: claim de usuario %q ausente", auth.ErrInvalidToken, v.userClaim)
+		// Without a usable identity we cannot audit or apply RBAC.
+		return nil, fmt.Errorf("%w: user claim %q absent", auth.ErrInvalidToken, v.userClaim)
 	}
-	// M3: verificar antigüedad del token (iat) para limitar el riesgo de replay.
+	// M3: verify token age (iat) to limit the replay risk.
 	if v.maxTokenAge > 0 {
 		if iatRaw, ok := claims["iat"].(float64); ok {
 			issuedAt := time.Unix(int64(iatRaw), 0)
 			age := time.Since(issuedAt)
 			if age > v.maxTokenAge {
-				return nil, fmt.Errorf("%w: token demasiado antiguo (edad=%v, máximo=%v)",
+				return nil, fmt.Errorf("%w: token too old (age=%v, max=%v)",
 					auth.ErrInvalidToken, age.Truncate(time.Second), v.maxTokenAge)
 			}
 		}
@@ -108,8 +109,8 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 	return ti, nil
 }
 
-// scopesFromClaims extrae los scopes del claim "scope" (string separado por
-// espacios, formato OAuth2) o "scp" (lista, usado por algunos proveedores).
+// scopesFromClaims extracts scopes from the "scope" claim (space-separated
+// string, OAuth2 format) or "scp" (list, used by some providers).
 func scopesFromClaims(claims map[string]any) []string {
 	if s, ok := claims["scope"].(string); ok && s != "" {
 		return strings.Fields(s)
@@ -124,8 +125,8 @@ func stringClaim(claims map[string]any, name string) string {
 	return ""
 }
 
-// stringSliceClaim devuelve el claim name como []string. Acepta tanto un array
-// JSON como un único string. Devuelve nil si el claim no existe.
+// stringSliceClaim returns claim name as []string. Accepts both a JSON array
+// and a single string. Returns nil if the claim does not exist.
 func stringSliceClaim(claims map[string]any, name string) []string {
 	switch v := claims[name].(type) {
 	case []any:

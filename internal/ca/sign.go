@@ -1,9 +1,9 @@
-// Package ca contiene las primitivas de bajo nivel de la CA SSH: generación del
-// par efímero (lado broker) y construcción+firma del certificado (lado firmante).
+// Package ca contains the low-level SSH CA primitives: ephemeral key-pair
+// generation (broker side) and certificate construction+signing (signer side).
 //
-// El firmado es nativo (golang.org/x/crypto/ssh): la clave de CA se consume a
-// través de un ssh.Signer, que puede estar respaldado por un crypto.Signer de
-// HSM/KMS/Secure Enclave (clave no exportable).
+// Signing is native (golang.org/x/crypto/ssh): the CA key is consumed through
+// an ssh.Signer, which can be backed by a crypto.Signer from an
+// HSM/KMS/Secure Enclave (non-exportable key).
 package ca
 
 import (
@@ -17,65 +17,66 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// Constraints son los límites que el firmante graba en el certificado. Los deriva
-// la política del firmante a partir de la intención; el broker no los elige.
+// Constraints are the limits the signer bakes into the certificate. They are
+// derived from the policy based on the intent; the broker does not choose them.
 type Constraints struct {
-	// Principal es el valor que sshd mapea a una cuenta local (p. ej. "host:web01").
+	// Principal is the value sshd maps to a local account (e.g. "host:web01").
 	Principal string
-	// TTL es la ventana de validez. Debe ser de minutos.
+	// TTL is the validity window. Should be on the order of minutes.
 	TTL time.Duration
-	// SourceAddress (CIDR o IP) fija desde dónde es usable el cert. Para destinos
-	// tras un bastión debe ser la IP de egreso del bastión.
+	// SourceAddress (CIDR or IP) pins where the cert may be used from. For
+	// targets behind a bastion it must be the bastion's egress IP.
 	SourceAddress string
-	// ForceCommand ata el cert a ejecutar solo ese comando (one-shot). Vacío en
-	// conexiones de sesión.
+	// ForceCommand binds the cert to execute only this command (one-shot). Empty
+	// for session connections.
 	ForceCommand string
-	// AllowPortForwarding añade permit-port-forwarding (solo hops bastión).
+	// AllowPortForwarding adds permit-port-forwarding (bastion hops only).
 	AllowPortForwarding bool
-	// AllowPTY añade permit-pty al certificado. Necesario para sesiones
-	// interactivas (mode=pty) y comandos one-shot que requieran TTY.
+	// AllowPTY adds permit-pty to the certificate. Required for interactive
+	// sessions (mode=pty) and one-shot commands that need a real TTY.
 	AllowPTY bool
-	// KeyID es la identidad para el log de sshd.
+	// KeyID is the identity string written to the sshd log.
 	KeyID string
 }
 
-// GenerateEphemeralKey crea el par efímero del cliente. La clave privada se queda
-// en el broker (hace la conexión SSH); solo la pública viaja al firmante.
+// GenerateEphemeralKey creates the client's ephemeral key pair. The private key
+// stays in the broker (used to establish the SSH connection); only the public
+// key travels to the signer.
 func GenerateEphemeralKey() (ed25519.PrivateKey, ssh.PublicKey, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generar par efímero: %w", err)
+		return nil, nil, fmt.Errorf("generating ephemeral key pair: %w", err)
 	}
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
-		return nil, nil, fmt.Errorf("envolver pubkey: %w", err)
+		return nil, nil, fmt.Errorf("wrapping pubkey: %w", err)
 	}
 	return priv, sshPub, nil
 }
 
-// LoadCAFromPEM carga la clave de CA desde PEM.
-// L1: emite un aviso en runtime para evitar uso inadvertido en producción.
-// En producción sustituir por un ssh.Signer respaldado por crypto.Signer de
-// HSM/KMS (p. ej. ssh.NewSignerFromSigner(kmsClient)); la clave nunca saldría
-// del módulo de seguridad.
+// LoadCAFromPEM loads the CA key from PEM.
+// L1: emits a runtime warning to prevent inadvertent use in production.
+// In production, replace with an ssh.Signer backed by a crypto.Signer from an
+// HSM/KMS (e.g. ssh.NewSignerFromSigner(kmsClient)); the key never leaves the
+// security module.
 func LoadCAFromPEM(pem []byte) (ssh.Signer, error) {
-	log.Printf("[WARN] ca.LoadCAFromPEM: clave de CA cargada desde PEM en memoria. " +
-		"Solo apto para laboratorio. En producción use un HSM/KMS.")
+	log.Printf("[WARN] ca.LoadCAFromPEM: CA key loaded from PEM in memory. " +
+		"Lab use only. Use an HSM/KMS in production.")
 	s, err := ssh.ParsePrivateKey(pem)
 	if err != nil {
-		return nil, fmt.Errorf("parsear clave de CA: %w", err)
+		return nil, fmt.Errorf("parsing CA key: %w", err)
 	}
 	return s, nil
 }
 
-// BuildAndSign construye un certificado de usuario acotado sobre pub y lo firma con
-// la clave de CA. Devuelve el cert y su número de serie único.
+// BuildAndSign constructs a scoped user certificate over pub and signs it with
+// the CA key. Returns the cert and its unique serial number.
 func BuildAndSign(caKey ssh.Signer, pub ssh.PublicKey, c Constraints) (*ssh.Certificate, uint64, error) {
 	if c.Principal == "" {
-		return nil, 0, fmt.Errorf("principal es obligatorio")
+		return nil, 0, fmt.Errorf("principal is required")
 	}
 	if c.TTL <= 0 || c.TTL > 15*time.Minute {
-		return nil, 0, fmt.Errorf("TTL debe estar en (0, 15m]; recibido %s", c.TTL)
+		return nil, 0, fmt.Errorf("TTL must be in (0, 15m]; got %s", c.TTL)
 	}
 
 	serial, err := randomSerial()
@@ -90,12 +91,12 @@ func BuildAndSign(caKey ssh.Signer, pub ssh.PublicKey, c Constraints) (*ssh.Cert
 		CertType:        ssh.UserCert,
 		KeyId:           c.KeyID,
 		ValidPrincipals: []string{c.Principal},
-		// Margen de 30s hacia atrás para tolerar desfase de reloj.
+		// 30 s back-dated to tolerate clock skew.
 		ValidAfter:  uint64(now.Add(-30 * time.Second).Unix()),
 		ValidBefore: uint64(now.Add(c.TTL).Unix()),
 		Permissions: ssh.Permissions{
 			CriticalOptions: map[string]string{},
-			Extensions:      map[string]string{}, // vacío: sin agent/X11 forwarding
+			Extensions:      map[string]string{}, // empty: no agent/X11 forwarding
 		},
 	}
 	if c.SourceAddress != "" {
@@ -112,7 +113,7 @@ func BuildAndSign(caKey ssh.Signer, pub ssh.PublicKey, c Constraints) (*ssh.Cert
 	}
 
 	if err := cert.SignCert(rand.Reader, caKey); err != nil {
-		return nil, 0, fmt.Errorf("firmar certificado: %w", err)
+		return nil, 0, fmt.Errorf("signing certificate: %w", err)
 	}
 	return cert, serial, nil
 }
@@ -120,7 +121,7 @@ func BuildAndSign(caKey ssh.Signer, pub ssh.PublicKey, c Constraints) (*ssh.Cert
 func randomSerial() (uint64, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		return 0, fmt.Errorf("serial aleatorio: %w", err)
+		return 0, fmt.Errorf("random serial: %w", err)
 	}
 	return binary.BigEndian.Uint64(b[:]), nil
 }

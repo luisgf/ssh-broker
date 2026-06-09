@@ -220,8 +220,8 @@ func TestSessionExecOwnershipC1(t *testing.T) {
 	if err == nil {
 		t.Fatal("SessionExec con caller incorrecto debe devolver error (C1)")
 	}
-	if !strings.Contains(err.Error(), "no pertenece") {
-		t.Errorf("mensaje de error inesperado: %v", err)
+	if !strings.Contains(err.Error(), "does not belong") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 
@@ -262,8 +262,8 @@ func TestSessionExecRechazaNewlineModoShell(t *testing.T) {
 			if err == nil {
 				t.Errorf("mode=%s cmd=%q: esperaba error por newline (M5)", mode, injected)
 			}
-			if !strings.Contains(err.Error(), "saltos de línea") {
-				t.Errorf("mode=%s: mensaje de error inesperado: %v", mode, err)
+			if !strings.Contains(err.Error(), "newlines") {
+				t.Errorf("mode=%s: unexpected error message: %v", mode, err)
 			}
 		}
 	}
@@ -301,8 +301,8 @@ func TestCloseSessionOwnershipC1(t *testing.T) {
 	if err == nil {
 		t.Fatal("CloseSession con caller incorrecto debe devolver error (C1)")
 	}
-	if !strings.Contains(err.Error(), "no pertenece") {
-		t.Errorf("mensaje de error inesperado: %v", err)
+	if !strings.Contains(err.Error(), "does not belong") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 
 	// La sesión debe seguir existiendo.
