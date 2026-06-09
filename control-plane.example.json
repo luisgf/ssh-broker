@@ -1,14 +1,14 @@
 {
-  "_comment": "Config del CONTROL PLANE (cmd/control-plane). Se sitúa entre el broker y el signer: reenvía las peticiones de firma propagando la identidad del broker (on_behalf_of) y orquesta la aprobación humana de comandos marcados como require_approval por la command policy. NO custodia la clave de CA (vive en el signer). Su CN de cliente mTLS frente al signer debe estar en 'trusted_forwarders' del signer.json.",
+  "_comment": "CONTROL PLANE config (cmd/control-plane). Sits between the broker and the signer: forwards signing requests propagating the broker identity (on_behalf_of) and orchestrates human approval for commands flagged as require_approval by the command policy. Does NOT hold the CA key (lives in the signer). Its mTLS client CN toward the signer must be in 'trusted_forwarders' in signer.json.",
 
   "listen": ":7443",
 
-  "_server_tls_comment": "mTLS de cara al BROKER: presenta server_cert y exige clientes (brokers y aprobadores) firmados por client_ca.",
+  "_server_tls_comment": "mTLS toward the BROKER: presents server_cert and requires clients (brokers and approvers) signed by client_ca.",
   "server_cert": "pki/control-plane.crt",
   "server_key": "pki/control-plane.key",
   "client_ca": "pki/mtls_ca.crt",
 
-  "_signer_comment": "Cliente mTLS hacia el SIGNER. El cert (CN=control-plane-1) debe estar en trusted_forwarders del signer.",
+  "_signer_comment": "mTLS client toward the SIGNER. The cert (CN=control-plane-1) must be in trusted_forwarders in the signer.",
   "signer": {
     "url": "https://127.0.0.1:9443",
     "client_cert": "pki/control-plane.crt",
@@ -16,7 +16,7 @@
     "ca": "pki/signer_ca.crt"
   },
 
-  "_approval_comment": "Aprobación humana. notifier: 'log' (default, escribe la solicitud en el log; el aprobador usa 'broker-ctl approval list'), 'webhook' (POST JSON plano a webhook_url, p. ej. un receptor Slack) o 'teams' (Adaptive Card o MessageCard a un Incoming Webhook de Microsoft Teams / Power Automate Workflow). teams_format: 'workflow' (default, recomendado para Power Automate) o 'messagecard' (legacy M365 Connectors, en deprecación). approval_url_template: URL con '{id}' sustituible por el approval ID; se incrusta como botón 'View request' en la card de Teams (déjalo vacío hasta tener el bridge de Fase 2). timeout_seconds: TTL de las solicitudes pendientes. callers: CNs autorizados a aprobar/denegar (POST /v1/approvals/{id}).",
+  "_approval_comment": "Human approval. notifier: 'log' (default, writes the request to the log; approver uses 'broker-ctl approval list'), 'webhook' (plain JSON POST to webhook_url, e.g. a Slack receiver) or 'teams' (Adaptive Card or MessageCard to a Microsoft Teams / Power Automate Workflow Incoming Webhook). teams_format: 'workflow' (default, recommended for Power Automate) or 'messagecard' (legacy M365 Connectors, being deprecated). approval_url_template: URL with '{id}' substituted by the approval ID; embedded as a 'View request' button in the Teams card (leave empty until the Phase 2 bridge is deployed). timeout_seconds: TTL of pending requests. callers: CNs authorised to approve/deny (POST /v1/approvals/{id}).",
   "approval": {
     "notifier": "log",
     "webhook_url": "",
@@ -26,7 +26,7 @@
     "approval_url_template": ""
   },
 
-  "_behavior_comment": "Guardrails de comportamiento por agente (sujeto = usuario final OIDC si lo hay, si no el CN del broker). mode: 'off' (default) | 'observe' (solo audita anomalías) | 'enforce' (anomalías escalan a aprobación humana; rate excedido se deniega con 429). Anomalías: pico de tasa, host nunca usado antes por ese agente, comando fuera de su histórico (fingerprint = primer token). rate_limit_per_min: máximo de peticiones por sujeto y minuto (0 = sin límite). Estado en memoria; reiniciar el control plane reinicia la línea base.",
+  "_behavior_comment": "Per-agent behaviour guardrails (subject = OIDC end user if present, otherwise broker CN). mode: 'off' (default) | 'observe' (audits anomalies only) | 'enforce' (anomalies escalate to human approval; rate exceeded is denied with 429). Anomalies: rate spike, host never used before by that agent, command outside its history (fingerprint = first token). rate_limit_per_min: maximum requests per subject per minute (0 = no limit). State is in-memory; restarting the control plane resets the baseline.",
   "behavior": {
     "mode": "observe",
     "rate_limit_per_min": 60

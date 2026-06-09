@@ -1,32 +1,32 @@
 {
-  "_comment": "Config del SERVICIO DE FIRMA (cmd/signer). Custodia la clave de CA y la política. Los brokers le piden certs por mTLS; el CN de su cert de cliente es el 'caller'.",
+  "_comment": "SIGNING SERVICE config (cmd/signer). Holds the CA key and the policy. Brokers request certs via mTLS; the CN of their client cert is the 'caller'.",
 
   "listen": ":9443",
   "server_cert": "pki/signer.crt",
   "server_key": "pki/signer.key",
   "client_ca": "pki/brokers_ca.crt",
 
-  "_ca_key_comment": "Custodia: PEM por ahora; sustituible por crypto.Signer de KMS/Secure Enclave/HSM sin tocar el resto (ca.LoadCAFromPEM -> ssh.Signer).",
+  "_ca_key_comment": "Custody: PEM for now; replaceable with a crypto.Signer from KMS/Secure Enclave/HSM without touching the rest (ca.LoadCAFromPEM → ssh.Signer).",
   "ca_key": "pki/ssh_ca",
 
   "audit_log": "signer_audit.log",
   "audit_key": "pki/signer_audit.seed",
   "max_ttl_seconds": 300,
 
-  "_reload_comment": "CNs (del cert de cliente) autorizados a invocar POST /v1/reload para recargar en caliente la política de hosts, max_ttl_seconds y la clave de CA. Vacío o ausente = endpoint HTTP deshabilitado (403); SIGHUP sigue funcionando porque es local al host. listen, TLS y audit_log requieren reinicio.",
+  "_reload_comment": "Client cert CNs authorised to invoke POST /v1/reload to hot-reload the host policy, max_ttl_seconds, and the CA key. Empty or absent = HTTP endpoint disabled (403); SIGHUP still works because it is local to the host. listen, TLS, and audit_log require a restart.",
   "reload_callers": ["broker-admin"],
 
-  "_trusted_forwarders_comment": "CNs autorizados a actuar en nombre de otro broker (campo on_behalf_of / cabecera X-On-Behalf-Of). Es el CN del control plane (cmd/control-plane). Solo estos CNs pueden (a) suplantar la identidad del broker para RBAC y (b) marcar approved=true para emitir comandos que requieren aprobación. Un broker normal NO debe estar aquí. Vacío/ausente = nadie puede suplantar (broker→signer directo sigue funcionando).",
+  "_trusted_forwarders_comment": "CNs authorised to act on behalf of another broker (on_behalf_of field / X-On-Behalf-Of header). This is the control plane CN (cmd/control-plane). Only these CNs may (a) impersonate a broker for RBAC and (b) set approved=true to issue commands that require approval. A regular broker must NOT be listed here. Empty/absent = nobody can impersonate (direct broker→signer still works).",
   "trusted_forwarders": ["control-plane-1"],
 
-  "_callers_comment": "RBAC por grupos. Mapea CN del cert mTLS del broker → grupos permitidos. Un CN ausente no tiene restricción de grupo (backward compatible): ve y firma todos los hosts. Un CN presente solo puede ver (/v1/hosts) y firmar (/v1/sign) hosts cuyo campo 'groups' intersecte con su allowed_groups. allowed_groups vacío = denegación total.",
+  "_callers_comment": "Group-based RBAC. Maps broker mTLS cert CN → allowed groups. An absent CN has no group restriction (backward compatible): sees and signs all hosts. A present CN can only see (/v1/hosts) and sign (/v1/sign) hosts whose 'groups' field intersects with its allowed_groups. Empty allowed_groups = total denial.",
   "callers": {
     "broker-1":    { "allowed_groups": ["prod-web", "databases"] },
     "broker-web":  { "allowed_groups": ["prod-web"] },
     "broker-db":   { "allowed_groups": ["databases"] }
   },
 
-  "_hosts_comment": "Política de emisión por host. El campo 'groups' declara los grupos RBAC a los que pertenece el host; un caller restringido solo lo ve si comparte algún grupo. Si 'groups' está ausente, el host no pertenece a ningún grupo (callers restringidos no lo verán). allowed_callers vacío = cualquier broker autenticado; allow_as_bastion habilita el host como salto. AVISO: si un host usa 'jump', el bastión debe estar en los mismos grupos o el broker no podrá resolver la cadena.",
+  "_hosts_comment": "Per-host issuance policy. The 'groups' field declares the RBAC groups this host belongs to; a restricted caller only sees it if they share at least one group. If 'groups' is absent, the host belongs to no group (restricted callers will not see it). Empty allowed_callers = any authenticated broker; allow_as_bastion enables the host as a ProxyJump target. WARNING: if a host uses 'jump', the bastion must be in the same groups or the broker will not be able to resolve the chain.",
   "hosts": {
     "bastion": {
       "principal": "host:bastion",
@@ -40,7 +40,7 @@
       "source_address": "10.0.0.1",
       "max_ttl_seconds": 120,
       "groups": ["prod-web"],
-      "_sudo_comment": "Permite sudo solo a root (allowed_sudo_users vacío implica solo root).",
+      "_sudo_comment": "Enables sudo to root only (empty allowed_sudo_users implies root only).",
       "allow_sudo": true,
       "allow_pty": true
     },
@@ -49,11 +49,11 @@
       "source_address": "10.0.0.2",
       "max_ttl_seconds": 120,
       "groups": ["prod-web"],
-      "_sudo_comment": "Permite sudo a root o al usuario 'deploy'.",
+      "_sudo_comment": "Enables sudo to root or the 'deploy' user.",
       "allow_sudo": true,
       "allowed_sudo_users": ["root", "deploy"],
       "allow_pty": true,
-      "_command_policy_comment": "AI-action firewall: restringe qué comandos pueden ejecutarse (one-shot). mode allowlist = el comando debe casar alguna regex de 'allow'; denylist = no debe casar ninguna de 'deny'; off/ausente = sin restricción. 'require_approval' (cualquier modo) marca comandos que exigirán aprobación humana out-of-band (la orquesta el control plane; Fase B). Reglas = regex RE2. 'shell_parse: true' parsea el comando como POSIX sh antes de evaluar: cada simple command se evalúa por separado, y nodos peligrosos (subshells, redirecciones a archivo) se rechazan incondicionalmente — evita bypasses con && o $(). AVISO: un host con command_policy NO admite sesiones (el comando no es verificable al firmar); usar ssh_execute.",
+      "_command_policy_comment": "AI-action firewall: restricts which commands may run (one-shot). mode allowlist = command must match a regex in 'allow'; denylist = must not match any in 'deny'; off/absent = no restriction. 'require_approval' (any mode) flags commands that require out-of-band human approval (orchestrated by the control plane; Phase B). Rules = RE2 regexes. 'shell_parse: true' parses the command as POSIX sh before evaluation: each simple command is evaluated separately, and dangerous nodes (subshells, file redirects) are rejected unconditionally — prevents bypasses via && or $(). WARNING: a host with command_policy does not allow sessions (command is not verifiable at signing time); use ssh_execute.",
       "command_policy": {
         "mode": "allowlist",
         "shell_parse": true,

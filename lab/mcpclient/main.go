@@ -1,8 +1,8 @@
-// Cliente MCP de laboratorio: lanza mcp-broker por stdio y ejecuta un escenario
-// completo (one-shot, sesión exec con reuso, sesión shell con estado). Solo para
-// verificación; no forma parte del producto.
+// Lab MCP client: launches mcp-broker over stdio and exercises a complete
+// scenario (one-shot, exec session with connection reuse, stateful shell
+// session). For verification only; not part of the product.
 //
-// Uso: mcpclient <broker-bin> <config> <target-host>
+// Usage: mcpclient <broker-bin> <config> <target-host>
 package main
 
 import (
@@ -51,11 +51,11 @@ func main() {
 		return ""
 	}
 
-	fmt.Println("\n## 1. ssh_execute one-shot (vía bastión):")
+	fmt.Println("\n## 1. ssh_execute one-shot (via bastion):")
 	r := call("ssh_execute", map[string]any{"server": target, "command": "hostname; echo OK_ONESHOT"})
 	fmt.Printf("isError=%v\n%s\n", r.IsError, text(r))
 
-	fmt.Println("\n## 2. sesión exec: dos comandos reutilizan la conexión:")
+	fmt.Println("\n## 2. exec session: two commands reuse the connection:")
 	r = call("ssh_session_open", map[string]any{"server": target, "mode": "exec"})
 	sid := r.StructuredContent.(map[string]any)["session_id"].(string)
 	fmt.Printf("open -> %s\n", text(r))
@@ -63,7 +63,7 @@ func main() {
 	fmt.Printf("exec2 -> %s\n", text(call("ssh_session_exec", map[string]any{"session_id": sid, "command": "echo B"})))
 	call("ssh_session_close", map[string]any{"session_id": sid})
 
-	fmt.Println("\n## 3. sesión shell: estado persiste (cd -> pwd):")
+	fmt.Println("\n## 3. shell session: state persists (cd -> pwd):")
 	r = call("ssh_session_open", map[string]any{"server": target, "mode": "shell"})
 	sid = r.StructuredContent.(map[string]any)["session_id"].(string)
 	fmt.Printf("open -> %s\n", text(r))
@@ -71,14 +71,14 @@ func main() {
 	fmt.Printf("pwd -> %s\n", text(call("ssh_session_exec", map[string]any{"session_id": sid, "command": "pwd"})))
 	call("ssh_session_close", map[string]any{"session_id": sid})
 
-	fmt.Println("\n## 4. carga del servidor:")
+	fmt.Println("\n## 4. server load:")
 	r = call("ssh_execute", map[string]any{"server": target, "command": "uptime && echo '---' && cat /proc/loadavg && echo '---' && nproc && echo '---' && free -h && echo '---' && top -bn1 | head -15"})
 	fmt.Printf("%s\n", text(r))
 
-	// 5. (opcional) host que el firmante NO autoriza → debe fallar en el servicio.
+	// 5. (optional) host that the signer does NOT authorise → must fail.
 	if len(os.Args) >= 5 {
 		denied := os.Args[4]
-		fmt.Printf("\n## 5. host denegado por politica (%s):\n", denied)
+		fmt.Printf("\n## 5. host denied by policy (%s):\n", denied)
 		r = call("ssh_execute", map[string]any{"server": denied, "command": "id"})
 		fmt.Printf("isError=%v\n%s\n", r.IsError, text(r))
 	}

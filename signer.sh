@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Gestión del servicio ssh-signer.
-# Uso: ./signer.sh {start|stop|status|restart|log}
+# ssh-signer service management.
+# Usage: ./signer.sh {start|stop|status|restart|log}
 
 set -euo pipefail
 
@@ -15,59 +15,59 @@ cmd_start() {
         local pid
         pid=$(cat "${PIDFILE}")
         if kill -0 "${pid}" 2>/dev/null; then
-            echo "signer ya está corriendo (PID ${pid})"
+            echo "signer is already running (PID ${pid})"
             exit 1
         else
-            echo "PID file huérfano encontrado, limpiando..."
+            echo "Stale PID file found, cleaning up..."
             rm -f "${PIDFILE}"
         fi
     fi
 
-    echo "Arrancando signer..."
+    echo "Starting signer..."
     "${BINARY}" -config "${CONFIG}" >> "${LOGFILE}" 2>&1 &
     local pid=$!
     echo "${pid}" > "${PIDFILE}"
 
-    # Esperar hasta 3s a que arranque o falle
+    # Wait up to 3s for the process to start or fail.
     local i=0
     while (( i < 6 )); do
         sleep 0.5
         if ! kill -0 "${pid}" 2>/dev/null; then
             rm -f "${PIDFILE}"
-            echo "ERROR: el signer terminó inesperadamente. Últimas líneas del log:"
+            echo "ERROR: signer exited unexpectedly. Last log lines:"
             tail -20 "${LOGFILE}"
             exit 1
         fi
         i=$((i + 1))
     done
 
-    echo "signer arrancado (PID ${pid})"
+    echo "signer started (PID ${pid})"
     echo "Log: ${LOGFILE}"
 }
 
 cmd_stop() {
     if [[ ! -f "${PIDFILE}" ]]; then
-        echo "signer no está corriendo (no hay PID file)"
+        echo "signer is not running (no PID file)"
         exit 0
     fi
     local pid
     pid=$(cat "${PIDFILE}")
     if kill -0 "${pid}" 2>/dev/null; then
-        echo "Parando signer (PID ${pid})..."
+        echo "Stopping signer (PID ${pid})..."
         kill "${pid}"
-        # Esperar hasta 5s a que termine
+        # Wait up to 5s for the process to exit.
         local i=0
         while (( i < 10 )) && kill -0 "${pid}" 2>/dev/null; do
             sleep 0.5
             i=$((i + 1))
         done
         if kill -0 "${pid}" 2>/dev/null; then
-            echo "No terminó, enviando SIGKILL..."
+            echo "Did not exit, sending SIGKILL..."
             kill -9 "${pid}"
         fi
-        echo "signer parado"
+        echo "signer stopped"
     else
-        echo "Proceso ${pid} no encontrado (ya había terminado)"
+        echo "Process ${pid} not found (already exited)"
     fi
     rm -f "${PIDFILE}"
 }
@@ -79,7 +79,7 @@ cmd_status() {
         if kill -0 "${pid}" 2>/dev/null; then
             echo "signer RUNNING  (PID ${pid})"
         else
-            echo "signer STOPPED  (PID file huérfano: ${pid})"
+            echo "signer STOPPED  (stale PID file: ${pid})"
         fi
     else
         echo "signer STOPPED"
@@ -87,7 +87,7 @@ cmd_status() {
 
     if [[ -f "${LOGFILE}" ]]; then
         echo ""
-        echo "--- Últimas líneas de ${LOGFILE} ---"
+        echo "--- Last lines of ${LOGFILE} ---"
         tail -10 "${LOGFILE}"
     fi
 }
@@ -100,7 +100,7 @@ cmd_restart() {
 
 cmd_log() {
     if [[ ! -f "${LOGFILE}" ]]; then
-        echo "No existe ${LOGFILE} todavía"
+        echo "${LOGFILE} does not exist yet"
         exit 1
     fi
     exec tail -f "${LOGFILE}"
@@ -113,7 +113,7 @@ case "${1:-}" in
     restart) cmd_restart ;;
     log)     cmd_log     ;;
     *)
-        echo "Uso: $(basename "$0") {start|stop|status|restart|log}"
+        echo "Usage: $(basename "$0") {start|stop|status|restart|log}"
         exit 1
         ;;
 esac
