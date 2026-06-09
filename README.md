@@ -161,8 +161,8 @@ action, and for operators to test policy.
 
 ```
 ssh_execute(server="web01", command="systemctl restart nginx", dry_run=true)
-→ [dry-run] PERMITIDO (requiere aprobación humana antes de ejecutar)
-  regla: require_approval:^systemctl restart
+→ [dry-run] ALLOWED (requires human approval before executing)
+  rule: require_approval:^systemctl restart
   force-command: systemctl restart nginx
 ```
 
@@ -238,6 +238,49 @@ Two modes (`behavior.mode` in `control-plane.json`):
 Because enforcement reuses the approval machinery, an anomalous-but-legitimate
 action isn't hard-blocked — a human can approve it, and the event is on the audit
 trail either way.
+
+## Session recording (v1.10.0)
+
+`shell` and `pty` sessions can be recorded to **ASCIIcast v2** files (`.cast`)
+for forensic replay, compliance, and audit. Enable with one config field:
+
+```json
+"session_recording_dir": "/var/log/ssh-broker/recordings"
+```
+
+One file per session: `<session_id>.cast`. The filename matches the `session_id`
+field in the broker audit log — the audit log is the search index.
+
+Three streams are captured with millisecond timestamps:
+
+| Event type | Content |
+|---|---|
+| `"i"` (input) | Command typed by the agent, before it reached the shell |
+| `"o"` (output) | Stdout, or the merged PTY stream |
+| `"e"` (stderr) | Stderr bytes (non-PTY sessions only) |
+
+The header embeds session metadata (`session_id`, `caller`, `host`, `serial`,
+`started_at`) in a private `ssh_broker` extension field — the file is
+self-describing without the audit log. Standard ASCIIcast tools work normally:
+
+```bash
+# Play back with timing
+asciinema play /var/log/ssh-broker/recordings/<session_id>.cast
+
+# Extract only what the agent typed (stdin)
+jq -r 'select(type == "array" and .[1] == "i") | .[2]' \
+  /var/log/ssh-broker/recordings/<session_id>.cast
+
+# Find recordings for a specific session via the audit log
+broker-ctl audit show --log audit.log --outcome session_open \
+  --host web01 --caller alice --json | jq -r '.session_id'
+```
+
+Only `shell` and `pty` sessions are recorded. One-shot `ssh_execute` and
+`exec`-mode sessions are not (their output is already in the MCP response and
+audit log).
+
+See [USAGE.md §8](USAGE.md) for full details.
 
 ## Why ssh-broker
 
@@ -428,6 +471,7 @@ lightweight, self-hosted package.
 | Per-command policy + dry-run (AI-action firewall) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Human-in-the-loop approval for AI commands | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Per-agent behavioral guardrails (anomaly/rate) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Session recording (ASCIIcast v2, stdin+stdout+stderr) | ✅ | ✅ | ❌ | Partial | ❌ |
 | Cryptographically chained audit log | ✅ | ❌ | ❌ | Partial | ❌ |
 | Single-binary / simple self-hosted | ✅ | ❌ | ❌ | ❌ | ✅ |
 | HSM/KMS for CA key | Roadmap | ✅ | ✅ | — | — |
@@ -479,10 +523,10 @@ not AI-agent workloads.
 
 ssh-broker fills a niche that no tool covers in a simple, self-hosted form:
 **MCP-native AI-agent access + in-memory ephemeral certs + separate signing
-service + cryptographically chained audit**, runnable as a small set of Go
-binaries without a control-plane cluster. The trade-off is that enterprise
-features (session recording, web UI, HSM integration, multi-region HA) are on
-the roadmap rather than available today.
+service + session recording in ASCIIcast v2 + cryptographically chained audit**,
+runnable as a small set of Go binaries without a control-plane cluster. The
+trade-off is that enterprise features (web UI, HSM integration, multi-region HA)
+are on the roadmap rather than available today.
 
 ## API Reference
 
@@ -510,6 +554,7 @@ See [`API.md`](API.md) for the full endpoint documentation.
 | `internal/ca/sign.go` | `GenerateEphemeralKey` + `BuildAndSign` (permit-pty, permit-port-forwarding) |
 | `internal/ssh/run.go` | Multi-hop dial (`Dial`/`Conn`) + one-shot execution with/without PTY |
 | `internal/ssh/shell.go` | Stateful shell: without PTY (`OpenShell`) and with PTY (`OpenShellPTY`) |
+| `internal/recording/recorder.go` | ASCIIcast v2 session recorder (stdin/stdout/stderr with timestamps) |
 | `internal/audit/log.go` | Signed and chained log (`elevation`, `pty` fields) |
 | `internal/auth/mtls.go` | mTLS for HTTP frontend + server-only TLS for HTTP+OAuth; caller identity |
 | `internal/mcpserver/*` | Shared tool registry (stdio and HTTP) parametrized by caller identity |
@@ -674,3 +719,4 @@ go test ./...               # cert build, signer policy (authz/TTL/sudo/PTY), ho
 - Rotation/segregation of audit key; ship the log to WORM storage or external
   service.
 - End-to-end lab scenario for sudo + PTY (`lab/run_mcp_lab.sh`).
+- ~~Session recording~~ — shipped in v1.10.0 (ASCIIcast v2, `session_recording_dir`).
