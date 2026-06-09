@@ -63,7 +63,7 @@ The system has four binaries:
   mcp-broker          MCP server (stdio) — the local interface for the AI agent
   mcp-broker-http     MCP server (HTTP + OAuth2/OIDC) — for multi-user deployments
   signer              Certificate Authority service (HTTPS + mTLS)
-  broker-ctl          CLI for managing hosts, approvals, and audit logs
+  broker-ctl          CLI for managing hosts, CA keys, callers, approvals, and audit logs
 
 The signer is the only component that holds the CA key. This separation is the core security property: a compromised broker can exfiltrate nothing useful.
 
@@ -159,7 +159,7 @@ Start Everything
 
 ADDING HOSTS WITH BROKER-CTL
 
-Instead of editing signer.json by hand, broker-ctl handles host management with automatic host key scanning:
+Instead of editing signer.json by hand, broker-ctl handles host management with automatic host key scanning. The v1.11.1 release significantly expanded its capabilities.
 
     # Add a host — scans the SSH host key automatically
     broker-ctl host add \
@@ -169,10 +169,25 @@ Instead of editing signer.json by hand, broker-ctl handles host management with 
       --scan \
       --ttl 120
 
-    # List configured hosts
+    # Add a host with an allowlist command policy
+    broker-ctl host add \
+      --name web01 \
+      --addr 10.0.0.21:22 \
+      --user deploy \
+      --scan \
+      --policy-mode allowlist \
+      --allow "^systemctl (status|restart) [a-z0-9_.-]+$" \
+      --allow "^journalctl " \
+      --require-approval "^systemctl restart "
+
+    # Update an existing host without touching its command_policy
+    broker-ctl host add --name web01 --addr 10.0.0.21:22 --user deploy --scan --force
+
+    # List configured hosts (v1.11.1: new columns JUMP, SRC_ADDR, SUDO_USERS, CALLERS, POLICY)
     broker-ctl host list
-    # NAME    ADDR              USER     TTL   SUDO   PTY   GROUPS
-    # web01   10.0.0.21:22      deploy   120   no     no    —
+    # NAME    ADDR           USER     TTL    JUMP  SRC_ADDR  SUDO  SUDO_USERS  PTY  GROUPS     CALLERS   POLICY
+    # ops01   10.0.0.30:22   deploy   120s   —     —         yes   —           yes  ops-team   broker-1  —
+    # web01   10.0.0.21:22   deploy   120s   —     —         no    —           no   prod-web   —         allowlist(2)
 
     # Add a host with sudo and PTY enabled
     broker-ctl host add \
@@ -187,6 +202,31 @@ Instead of editing signer.json by hand, broker-ctl handles host management with 
 
     # Reload the signer to pick up changes
     broker-ctl reload
+
+Managing CA keys (v1.11.1)
+
+    # Add the default CA key (PEM file)
+    broker-ctl ca-keys add --name _default --type pem --path /secure/ssh_ca
+
+    # Add a per-group CA key backed by Azure Key Vault
+    broker-ctl ca-keys add --name prod-db --type akv \
+      --vault-url https://myvault.vault.azure.net \
+      --key-name ssh-ca-prod-db
+
+    # List CA key entries
+    broker-ctl ca-keys list
+    # NAME      TYPE  DETAIL
+    # _default  pem   /secure/ssh_ca
+    # prod-db   akv   https://myvault.vault.azure.net (key: ssh-ca-prod-db)
+
+Managing callers (v1.11.1)
+
+    # Grant broker-1 access to prod-web and prod-db host groups
+    broker-ctl callers add --name broker-1 --groups prod-web,prod-db
+
+    broker-ctl callers list
+    # NAME      ALLOWED_GROUPS
+    # broker-1  prod-web,prod-db
 
 The signer hot-reloads its configuration — the broker picks up new hosts within 30 seconds without restarting.
 
@@ -496,33 +536,70 @@ The source_address field pins the certificate to the bastion's egress IP — the
 
 ---
 
+CA KEY ISOLATION PER HOST GROUP (v1.11.0)
+
+A single CA key means a single blast radius. If that key is compromised, every host it signs for is affected. Starting with v1.11.0, ssh-broker supports a distinct CA key per host group — and each key can live in Azure Key Vault, where the private key never leaves the HSM.
+
+Configuration in signer.json:
+
+    {
+      "ca_keys": {
+        "_default": { "type": "pem", "path": "pki/ssh_ca" },
+        "prod-web":  { "type": "akv",
+                       "vault_url": "https://myvault.vault.azure.net",
+                       "key_name":  "ssh-ca-prod-web" },
+        "databases": { "type": "akv",
+                       "vault_url": "https://myvault.vault.azure.net",
+                       "key_name":  "ssh-ca-db" }
+      },
+      "hosts": {
+        "web01":  { "groups": ["prod-web"],  ... },
+        "db01":   { "groups": ["databases"], ... },
+        "dev01":  { ... }   ← falls back to _default
+      }
+    }
+
+Selection logic: the signer iterates a host's groups in order and picks the first entry that has a matching ca_keys key. Hosts with no matching group use _default. If only the legacy ca_key string is set, everything falls back to it unchanged.
+
+How AKV signing works:
+
+- On startup, the signer fetches and caches only the public key from AKV.
+- When signing a certificate, it calls azkeys.SignKey: the payload is hashed locally and the raw hash is sent to AKV, which returns the signature. The private key never leaves AKV.
+- Supported key types: RSA (SHA-256, SHA-384, SHA-512) and EC P-256/P-384/P-521. Ed25519 is not supported by the AKV signing API.
+
+Backward compatible: existing setups with a single ca_key string require no changes.
+
+---
+
 HOW IT COMPARES
 
-  Tool             Ephemeral certs   MCP native   No cluster   AI threat model
-  ssh-broker       ✓ Ed25519 mem     ✓            ✓ binary     ✓ designed for agents
-  Teleport         ✓                 ✓ (2025)     ✗ cluster    ✓ (Agentic Id, 2026)
-  Vault SSH        ✓                 ✗            ✗            ✗
-  Smallstep        ✓                 ✗            ✗            ✗
-  ssh-mcp          ✗ static key      ✓            ✓            ✗
+  Tool             Ephemeral certs   MCP native   No cluster   HSM/KMS CA   AI threat model
+  ssh-broker       ✓ Ed25519 mem     ✓            ✓ binary     ✓ AKV        ✓ designed for agents
+  Teleport         ✓                 ✓ (2025)     ✗ cluster    ✓            ✓ (Agentic Id, 2026)
+  Vault SSH        ✓                 ✗            ✗            ✓            ✗
+  Smallstep        ✓                 ✗            ✗            ✓            ✗
+  ssh-mcp          ✗ static key      ✓            ✓            ✗            ✗
 
-Teleport and Vault are production-grade and have HSM support. ssh-broker covers a specific niche: a single Go binary that speaks MCP natively, issues ephemeral certs from memory, and logs an audit trail you can verify offline — without a cluster.
+Teleport and Vault are production-grade and have HSM support. ssh-broker covers a specific niche: a single Go binary that speaks MCP natively, issues ephemeral certs from memory, stores CA keys in Azure Key Vault, and logs an audit trail you can verify offline — without a cluster.
 
 ---
 
 WHAT'S NEXT
 
-A few things on the roadmap that aren't implemented yet:
+Shipped since this article was first published:
 
-- CA key in HSM/KMS: the seam is ready — ca.LoadCAFromPEM returns a ssh.Signer,
-  swappable for ssh.NewSignerFromSigner(kmsClient) where kmsClient implements
-  crypto.Signer.
+- ✓ CA key in HSM/KMS — Azure Key Vault backend, "type": "akv" in ca_keys (v1.11.0)
+- ✓ One CA per host group — ca_keys map with per-group key assignment (v1.11.0)
+- ✓ broker-ctl: command_policy silent-erasure bug fixed; ca-keys/callers subcommands; command policy flags --policy-mode/--allow/--deny/--require-approval (v1.11.1)
+
+Still on the roadmap:
+
 - KRL (Key Revocation List): GET /v1/revoke endpoint to invalidate certificates
   by serial.
 - Teams bidirectional approval: the notification card is already sent; the missing
   piece is a cmd/approval-bridge that lets an approver click "Approve" in Teams
   rather than running broker-ctl approval allow <id>.
-- One CA per host group: today there's a single CA key. Binding each group to its
-  own CA limits the blast radius of a CA key compromise.
+- Rate limiting per broker CN in the signing service (anti-DoS/abuse limit).
 
 ---
 
@@ -530,9 +607,9 @@ CLOSING THOUGHTS
 
 The core bet of this project is that AI agents need a different security model than human operators. A human using SSH has context, judgment, and accountability. An agent operating autonomously has none of those — but it does have well-defined tool call boundaries, and those boundaries are the right place to enforce policy.
 
-Ephemeral certificates, a physically separated signer, command-level policy with shell AST parsing, a cryptographically chained audit trail, and now full session recordings in a standard replay format — each of these is individually available in other tools. What ssh-broker does is wire all of them together in a form that a language model can call in a single tool invocation.
+Ephemeral certificates, a physically separated signer, command-level policy with shell AST parsing, a cryptographically chained audit trail, full session recordings in a standard replay format, per-group CA key isolation backed by Azure Key Vault — each of these is individually available in other tools. What ssh-broker does is wire all of them together in a form that a language model can call in a single tool invocation.
 
-The code is at https://github.com/luisgf/ssh-broker (v1.10.0).
+The code is at https://github.com/luisgf/ssh-broker (v1.11.1).
 
 ---
 
