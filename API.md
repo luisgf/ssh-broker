@@ -388,7 +388,8 @@ ephemeral certificate from the signer, opens the SSH connection, runs the
 command, and discards the credential — all within the request lifetime.
 
 **Auth:** mTLS client certificate.  
-**Content-Type:** `application/json`
+**Content-Type:** `application/json`  
+**Max body size:** 64 KiB
 
 **Request body:**
 
