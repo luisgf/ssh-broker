@@ -1,15 +1,19 @@
-// Command control-plane es el Policy Enforcement Point entre el broker y el signer.
-// Reenvía las peticiones de firma al signer propagando la identidad del broker
-// (on_behalf_of) y orquesta la aprobación humana de los comandos que la command
-// policy marca como require_approval. NO custodia la clave de CA (vive en el signer).
+// Command control-plane is the Policy Enforcement Point between the broker and
+// the signer. It forwards signing requests to the signer, propagating the
+// broker identity (on_behalf_of), and orchestrates human approval for commands
+// that the command policy flags as require_approval. It does NOT hold the CA
+// key (which lives in the signer).
 //
-// Flujo de aprobación (polling asíncrono, para no mantener conexiones abiertas):
-//  1. broker → POST /v1/sign. El control plane reenvía al signer (approved=false).
-//  2. Si el signer responde sin certificado (requiere aprobación), el control plane
-//     crea una solicitud, notifica out-of-band y responde 202 {approval_id}.
-//  3. El broker hace polling de GET /v1/sign/result/{id}.
-//  4. Un humano aprueba con POST /v1/approvals/{id} (broker-ctl approval allow).
-//  5. El siguiente poll reenvía al signer con approved=true y devuelve el cert.
+// Approval flow (async polling, to avoid holding open connections):
+//  1. broker → POST /v1/sign. The control plane forwards to the signer
+//     (approved=false).
+//  2. If the signer returns no certificate (requires approval), the control
+//     plane creates a request, notifies out-of-band, and responds 202
+//     {approval_id}.
+//  3. The broker polls GET /v1/sign/result/{id}.
+//  4. A human approves with POST /v1/approvals/{id} (broker-ctl approval allow).
+//  5. The next poll forwards to the signer with approved=true and returns the
+//     cert.
 package main
 
 import (
@@ -30,16 +34,17 @@ import (
 	"github.com/luisgf/ssh-broker/internal/signer"
 )
 
-// Config del control plane.
+// Config is the control plane configuration.
 type Config struct {
-	Listen string `json:"listen"` // p. ej. ":7443"
+	Listen string `json:"listen"` // e.g. ":7443"
 
-	// mTLS de cara al broker: presenta server_cert y exige clientes firmados por client_ca.
+	// mTLS toward the broker: presents server_cert and requires clients signed
+	// by client_ca.
 	ServerCert string `json:"server_cert"`
 	ServerKey  string `json:"server_key"`
 	ClientCA   string `json:"client_ca"`
 
-	// Signer: cliente mTLS hacia el servicio de firma.
+	// Signer: mTLS client toward the signing service.
 	Signer struct {
 		URL        string `json:"url"`
 		ClientCert string `json:"client_cert"`
@@ -47,22 +52,22 @@ type Config struct {
 		CA         string `json:"ca"`
 	} `json:"signer"`
 
-	// Approval: orquestación de la aprobación humana.
+	// Approval: human-approval orchestration.
 	Approval struct {
 		Notifier       string   `json:"notifier"`        // "webhook" | "teams" | "log" (default)
-		WebhookURL     string   `json:"webhook_url"`     // requerido si notifier=webhook o teams
-		TimeoutSeconds int      `json:"timeout_seconds"` // TTL de las solicitudes pendientes
-		Callers        []string `json:"callers"`         // CNs autorizados a aprobar/denegar
+		WebhookURL     string   `json:"webhook_url"`     // required when notifier=webhook or teams
+		TimeoutSeconds int      `json:"timeout_seconds"` // TTL for pending requests
+		Callers        []string `json:"callers"`         // CNs authorised to approve/deny
 
-		// Campos específicos de Teams (notifier=teams).
+		// Teams-specific fields (notifier=teams).
 		TeamsFormat         string `json:"teams_format"`          // "workflow" (default) | "messagecard"
-		ApprovalURLTemplate string `json:"approval_url_template"` // URL con "{id}" para enlazar la solicitud
+		ApprovalURLTemplate string `json:"approval_url_template"` // URL with "{id}" to link the request
 	} `json:"approval"`
 
-	// Behavior: guardrails de comportamiento (anomalías + rate limiting).
+	// Behavior: behaviour guardrails (anomaly detection + rate limiting).
 	Behavior control.BehaviorConfig `json:"behavior"`
 
-	// Auditoría del control plane (independiente del broker y del signer).
+	// Audit log for the control plane (independent of broker and signer).
 	AuditLog string `json:"audit_log"`
 	AuditKey string `json:"audit_key"`
 }
@@ -77,7 +82,7 @@ type server struct {
 }
 
 func main() {
-	cfgPath := flag.String("config", "control-plane.json", "ruta al fichero de configuración JSON")
+	cfgPath := flag.String("config", "control-plane.json", "path to JSON configuration file")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
@@ -87,20 +92,20 @@ func main() {
 
 	signerTLS, err := auth.ClientTLSConfig(cfg.Signer.ClientCert, cfg.Signer.ClientKey, cfg.Signer.CA)
 	if err != nil {
-		log.Fatalf("tls cliente del signer: %v", err)
+		log.Fatalf("signer client TLS: %v", err)
 	}
 	remote := signer.NewRemote(cfg.Signer.URL, signerTLS, 10*time.Second)
 
 	seed, err := os.ReadFile(cfg.AuditKey)
 	if err != nil {
-		log.Fatalf("leer clave de auditoría: %v", err)
+		log.Fatalf("reading audit key: %v", err)
 	}
 	if len(seed) < ed25519.SeedSize {
-		log.Fatalf("clave de auditoría demasiado corta")
+		log.Fatalf("audit key too short")
 	}
 	auditLog, err := audit.Open(cfg.AuditLog, ed25519.NewKeyFromSeed(seed[:ed25519.SeedSize]))
 	if err != nil {
-		log.Fatalf("auditoría: %v", err)
+		log.Fatalf("audit: %v", err)
 	}
 	defer auditLog.Close()
 
@@ -108,12 +113,12 @@ func main() {
 	switch cfg.Approval.Notifier {
 	case "webhook":
 		if cfg.Approval.WebhookURL == "" {
-			log.Fatalf("notifier=webhook requiere webhook_url")
+			log.Fatalf("notifier=webhook requires webhook_url")
 		}
 		notifier = control.NewWebhookNotifier(cfg.Approval.WebhookURL)
 	case "teams":
 		if cfg.Approval.WebhookURL == "" {
-			log.Fatalf("notifier=teams requiere webhook_url")
+			log.Fatalf("notifier=teams requires webhook_url")
 		}
 		notifier = control.NewTeamsNotifier(
 			cfg.Approval.WebhookURL,
@@ -155,31 +160,32 @@ func main() {
 	if behaviorMode == "" {
 		behaviorMode = control.BehaviorOff
 	}
-	log.Printf("control-plane (mTLS) en %s; signer=%s; aprobadores=%d; behavior=%s", cfg.Listen, cfg.Signer.URL, len(srv.approveCN), behaviorMode)
+	log.Printf("control-plane (mTLS) on %s; signer=%s; approvers=%d; behavior=%s", cfg.Listen, cfg.Signer.URL, len(srv.approveCN), behaviorMode)
 	log.Fatal(httpSrv.ListenAndServeTLS("", ""))
 }
 
-// handleSign reenvía la petición al signer en nombre del broker. Si el signer no
-// emite certificado (requiere aprobación), crea una solicitud y responde 202.
+// handleSign forwards the request to the signer on behalf of the broker. If
+// the signer does not issue a certificate (requires approval), it creates a
+// request and responds 202.
 func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	brokerCN, err := auth.CallerCN(r)
 	if err != nil {
-		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req signer.WireRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "petición inválida", http.StatusBadRequest)
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 
-	// Dry-run: passthrough de la decisión (no pasa por los guardrails ni cuenta
-	// para el rate limit, ya que no ejecuta nada).
+	// Dry-run: pass through the decision (skips guardrails and rate limit, since
+	// nothing is executed).
 	if req.DryRun {
 		in, err := intentFrom(req, brokerCN, false)
 		if err != nil {
-			http.Error(w, "pubkey inválida", http.StatusBadRequest)
+			http.Error(w, "invalid pubkey", http.StatusBadRequest)
 			return
 		}
 		issued, err := s.remote.SignIntent(r.Context(), in)
@@ -191,14 +197,14 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Guardrails de comportamiento.
+	// Behaviour guardrails.
 	if s.behavior.Enabled() && !s.checkBehaviorGuardrails(w, r, brokerCN, req) {
 		return
 	}
 
 	in, err := intentFrom(req, brokerCN, false)
 	if err != nil {
-		http.Error(w, "pubkey inválida", http.StatusBadRequest)
+		http.Error(w, "invalid pubkey", http.StatusBadRequest)
 		return
 	}
 	issued, err := s.remote.SignIntent(r.Context(), in)
@@ -210,8 +216,9 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	s.forwardSignResult(w, r, brokerCN, req, issued)
 }
 
-// checkBehaviorGuardrails evalúa los guardrails de comportamiento. Devuelve true
-// si la petición puede continuar, false si ya se respondió (bloqueada/escalada).
+// checkBehaviorGuardrails evaluates the behaviour guardrails. Returns true
+// when the request may proceed, false when a response has already been sent
+// (blocked/escalated).
 func (s *server) checkBehaviorGuardrails(w http.ResponseWriter, r *http.Request, brokerCN string, req signer.WireRequest) bool {
 	subject := req.EndUser
 	if subject == "" {
@@ -219,30 +226,30 @@ func (s *server) checkBehaviorGuardrails(w http.ResponseWriter, r *http.Request,
 	}
 	anomalies, exceeded := s.behavior.Check(subject, req.Host, req.Command)
 	if !s.behavior.Enforcing() {
-		// Modo observe: auditar la anomalía y continuar.
+		// Observe mode: audit the anomaly and continue.
 		if len(anomalies) > 0 || exceeded {
 			s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "anomaly", Anomaly: strings.Join(anomalies, ",")})
 		}
 		return true
 	}
-	// Modo enforce.
+	// Enforce mode.
 	if exceeded {
 		s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "rate-limited", Anomaly: "rate-exceeded"})
-		http.Error(w, "límite de tasa excedido", http.StatusTooManyRequests)
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 		return false
 	}
 	if len(anomalies) > 0 {
-		// Verificar que el comando sería permitido antes de molestar a un humano.
+		// Verify the command would be allowed before bothering a human.
 		din, err := intentFrom(req, brokerCN, false)
 		if err != nil {
-			http.Error(w, "pubkey inválida", http.StatusBadRequest)
+			http.Error(w, "invalid pubkey", http.StatusBadRequest)
 			return false
 		}
 		din.DryRun = true
 		d, err := s.remote.SignIntent(r.Context(), din)
 		if err != nil || d.Decision == nil || !d.Decision.Allowed {
 			s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "denied", Anomaly: strings.Join(anomalies, ","), Err: errString(err)})
-			http.Error(w, "comando no permitido", http.StatusForbidden)
+			http.Error(w, "command not allowed", http.StatusForbidden)
 			return false
 		}
 		s.requireApproval(w, brokerCN, req, "behavior", strings.Join(anomalies, ","))
@@ -251,8 +258,8 @@ func (s *server) checkBehaviorGuardrails(w http.ResponseWriter, r *http.Request,
 	return true
 }
 
-// forwardSignResult responde al broker con el resultado de una firma del signer.
-// Cubre los tres estados: cert emitido, aprobación requerida y error inesperado.
+// forwardSignResult responds to the broker with the result of a signer signing.
+// Covers three states: cert issued, approval required, and unexpected error.
 func (s *server) forwardSignResult(w http.ResponseWriter, _ *http.Request, brokerCN string, req signer.WireRequest, issued *signer.Issued) {
 	if issued.Certificate != nil {
 		s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Serial: issued.Serial, Outcome: "forwarded"})
@@ -268,43 +275,43 @@ func (s *server) forwardSignResult(w http.ResponseWriter, _ *http.Request, broke
 		s.requireApproval(w, brokerCN, req, issued.Decision.MatchedRule, "")
 		return
 	}
-	// Estado inesperado: ni cert, ni dry-run, ni aprobación.
-	http.Error(w, "respuesta del signer sin certificado", http.StatusBadGateway)
+	// Unexpected state: no cert, not dry-run, not approval.
+	http.Error(w, "signer response missing certificate", http.StatusBadGateway)
 }
 
-// requireApproval crea una solicitud de aprobación, notifica y responde 202.
-// rule documenta el motivo (regla de command policy o "behavior"); anomaly lista
-// las anomalías de comportamiento si la escalada vino de los guardrails.
+// requireApproval creates an approval request, notifies, and responds 202.
+// rule documents the reason (command policy rule or "behavior"); anomaly lists
+// behaviour anomalies when the escalation came from the guardrails.
 func (s *server) requireApproval(w http.ResponseWriter, brokerCN string, req signer.WireRequest, rule, anomaly string) {
 	a, err := s.registry.Create(req, brokerCN, &signer.DecisionInfo{RequireApproval: true, MatchedRule: rule})
 	if err != nil {
-		http.Error(w, "no se pudo crear la solicitud de aprobación", http.StatusInternalServerError)
+		http.Error(w, "could not create approval request", http.StatusInternalServerError)
 		return
 	}
 	if nerr := s.notifier.Notify(*a); nerr != nil {
-		log.Printf("advertencia: notificación de aprobación fallida: %v", nerr)
+		log.Printf("warning: approval notification failed: %v", nerr)
 	}
 	s.auditE(audit.Entry{Caller: brokerCN, Host: req.Host, Command: req.Command, Outcome: "approval-required", ApprovalID: a.ID, PolicyRule: rule, Anomaly: anomaly})
 	writeJSON(w, http.StatusAccepted, map[string]string{"approval_id": a.ID, "status": string(control.StatusPending)})
 }
 
-// handleResult sirve el polling del broker sobre una solicitud de aprobación.
-// Cuando está aprobada, reenvía al signer con approved=true y devuelve el cert.
+// handleResult serves the broker's polling for an approval request. When
+// approved, it forwards to the signer with approved=true and returns the cert.
 func (s *server) handleResult(w http.ResponseWriter, r *http.Request) {
 	pollerCN, err := auth.CallerCN(r)
 	if err != nil {
-		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 	id := r.PathValue("id")
 	a, ok := s.registry.Get(id)
 	if !ok {
-		http.Error(w, "solicitud desconocida", http.StatusNotFound)
+		http.Error(w, "unknown request", http.StatusNotFound)
 		return
 	}
-	// Solo el broker que originó la solicitud puede recoger su resultado.
+	// Only the broker that originated the request may collect its result.
 	if a.Caller != pollerCN {
-		http.Error(w, "no autorizado", http.StatusForbidden)
+		http.Error(w, "not authorised", http.StatusForbidden)
 		return
 	}
 
@@ -313,26 +320,26 @@ func (s *server) handleResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]string{"status": string(a.Status)})
 	case control.StatusDenied:
 		s.auditE(audit.Entry{Caller: a.Caller, Host: a.Host, Command: a.Command, Outcome: "approval-denied", ApprovalID: a.ID, ApprovedBy: a.DecidedBy})
-		http.Error(w, "aprobación denegada", http.StatusForbidden)
+		http.Error(w, "approval denied", http.StatusForbidden)
 	case control.StatusExpired:
 		s.auditE(audit.Entry{Caller: a.Caller, Host: a.Host, Command: a.Command, Outcome: "approval-timeout", ApprovalID: a.ID})
-		http.Error(w, "aprobación expirada", http.StatusRequestTimeout)
+		http.Error(w, "approval expired", http.StatusRequestTimeout)
 	case control.StatusApproved:
-		// Consumir la aprobación (una sola emisión por aprobación).
+		// Consume the approval (one certificate per approval).
 		if !s.registry.Consume(id) {
-			http.Error(w, "aprobación ya utilizada", http.StatusGone)
+			http.Error(w, "approval already used", http.StatusGone)
 			return
 		}
 		req, _ := s.registry.Request(id)
 		in, err := intentFrom(req, a.Caller, true)
 		if err != nil {
-			http.Error(w, "pubkey inválida", http.StatusBadRequest)
+			http.Error(w, "invalid pubkey", http.StatusBadRequest)
 			return
 		}
 		issued, err := s.remote.SignIntent(r.Context(), in)
 		if err != nil || issued.Certificate == nil {
 			s.auditE(audit.Entry{Caller: a.Caller, Host: a.Host, Command: a.Command, Outcome: "error", ApprovalID: a.ID, Err: errString(err)})
-			http.Error(w, "firma tras aprobación fallida", http.StatusBadGateway)
+			http.Error(w, "signing after approval failed", http.StatusBadGateway)
 			return
 		}
 		s.auditE(audit.Entry{Caller: a.Caller, Host: a.Host, Command: a.Command, Serial: issued.Serial, Outcome: "approval-granted", ApprovalID: a.ID, ApprovedBy: a.DecidedBy})
@@ -345,12 +352,13 @@ func (s *server) handleResult(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleHosts reenvía GET /v1/hosts al signer en nombre del broker (la cabecera
-// X-On-Behalf-Of asegura que el filtrado por grupos sea el del broker original).
+// handleHosts forwards GET /v1/hosts to the signer on behalf of the broker
+// (the X-On-Behalf-Of header ensures group filtering matches the original
+// broker).
 func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	brokerCN, err := auth.CallerCN(r)
 	if err != nil {
-		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 	hosts, err := s.remote.FetchHosts(r.Context(), brokerCN)
@@ -368,7 +376,7 @@ func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleApprovalsList lista las solicitudes (solo aprobadores autorizados).
+// handleApprovalsList lists pending requests (authorised approvers only).
 func (s *server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 	if !s.isApprover(w, r) {
 		return
@@ -376,11 +384,11 @@ func (s *server) handleApprovalsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.registry.List())
 }
 
-// handleApprovalDecide resuelve una solicitud como aprobada o denegada.
+// handleApprovalDecide resolves a request as approved or denied.
 func (s *server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 	cn, ok := s.approver(r)
 	if !ok {
-		http.Error(w, "no autorizado para aprobar", http.StatusForbidden)
+		http.Error(w, "not authorised to approve", http.StatusForbidden)
 		return
 	}
 	id := r.PathValue("id")
@@ -389,7 +397,7 @@ func (s *server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 		Approve bool `json:"approve"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "petición inválida", http.StatusBadRequest)
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 	a, err := s.registry.Decide(id, body.Approve, cn)
@@ -405,7 +413,7 @@ func (s *server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
-// approver devuelve el CN si está autorizado a aprobar; ok=false en otro caso.
+// approver returns the CN if it is authorised to approve; ok=false otherwise.
 func (s *server) approver(r *http.Request) (string, bool) {
 	cn, err := auth.CallerCN(r)
 	if err != nil {
@@ -419,7 +427,7 @@ func (s *server) approver(r *http.Request) (string, bool) {
 
 func (s *server) isApprover(w http.ResponseWriter, r *http.Request) bool {
 	if _, ok := s.approver(r); !ok {
-		http.Error(w, "no autorizado", http.StatusForbidden)
+		http.Error(w, "not authorised", http.StatusForbidden)
 		return false
 	}
 	return true
@@ -427,12 +435,12 @@ func (s *server) isApprover(w http.ResponseWriter, r *http.Request) bool {
 
 func (s *server) auditE(e audit.Entry) {
 	if err := s.audit.Append(e); err != nil {
-		log.Printf("advertencia: error escribiendo audit log del control plane: %v", err)
+		log.Printf("warning: error writing control plane audit log: %v", err)
 	}
 }
 
-// intentFrom convierte una WireRequest entrante en un Intent para el signer,
-// fijando on_behalf_of (CN del broker) y, opcionalmente, approved.
+// intentFrom converts an incoming WireRequest into an Intent for the signer,
+// setting on_behalf_of (broker CN) and, optionally, approved.
 func intentFrom(req signer.WireRequest, onBehalfOf string, approved bool) (signer.Intent, error) {
 	pub, err := signer.ParsePublicKey(req.PublicKey)
 	if err != nil {

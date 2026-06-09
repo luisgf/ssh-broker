@@ -1,6 +1,6 @@
-// Command broker expone el motor del broker por HTTP+mTLS: un agente autorizado
-// (cert de cliente) hace POST /v1/ssh_run y recibe solo la salida del comando.
-// La credencial SSH efímera nunca sale del proceso.
+// Command broker exposes the broker engine over HTTP+mTLS: an authorised agent
+// (client certificate) POSTs /v1/ssh_run and receives only the command output.
+// The ephemeral SSH credential never leaves the process.
 package main
 
 import (
@@ -17,7 +17,7 @@ type runRequest struct {
 	Host       string `json:"host"`
 	Command    string `json:"command"`
 	TTLSeconds int    `json:"ttl_seconds"`
-	// Elevación NOPASSWD.
+	// Elevation NOPASSWD.
 	Sudo     bool   `json:"sudo,omitempty"`
 	SudoUser string `json:"sudo_user,omitempty"`
 	// PTY.
@@ -32,7 +32,7 @@ type runResponse struct {
 }
 
 func main() {
-	cfgPath := flag.String("config", "config.json", "ruta al fichero de configuración JSON")
+	cfgPath := flag.String("config", "config.json", "path to JSON configuration file")
 	flag.Parse()
 
 	cfg, err := broker.LoadConfig(*cfgPath)
@@ -41,7 +41,7 @@ func main() {
 	}
 	eng, err := broker.NewEngine(cfg)
 	if err != nil {
-		log.Fatalf("inicializar broker: %v", err)
+		log.Fatalf("initialising broker: %v", err)
 	}
 	defer eng.Close()
 
@@ -53,17 +53,17 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/ssh_run", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		caller, err := auth.CallerCN(r)
 		if err != nil {
-			http.Error(w, "no autenticado", http.StatusUnauthorized)
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
 			return
 		}
 		var req runRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "petición inválida", http.StatusBadRequest)
+			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
 		res, err := eng.Execute(r.Context(), broker.Caller{ID: caller}, req.Host, req.Command, req.TTLSeconds,
@@ -78,7 +78,7 @@ func main() {
 	})
 
 	httpSrv := &http.Server{Addr: cfg.Listen, Handler: mux, TLSConfig: tlsCfg}
-	log.Printf("broker HTTP (mTLS) en %s", cfg.Listen)
+	log.Printf("broker HTTP (mTLS) on %s", cfg.Listen)
 	log.Fatal(httpSrv.ListenAndServeTLS("", ""))
 }
 

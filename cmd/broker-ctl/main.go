@@ -1,15 +1,15 @@
-// broker-ctl gestiona la configuración del signer (signer.json), fuerza recargas
-// y permite revisar los logs de auditoría.
+// broker-ctl manages the signer configuration (signer.json), triggers reloads,
+// and allows reviewing audit logs.
 //
-// Uso:
+// Usage:
 //
-//	broker-ctl host add    [flags]          # Añade o actualiza un host
-//	broker-ctl host list   [--config f]     # Lista hosts configurados
-//	broker-ctl host remove [--config f] <nombre>
-//	broker-ctl reload      [--config f] [flags]           # Recarga signer
-//	broker-ctl audit tail   --log <f> [-n N]              # Sigue el log en tiempo real
-//	broker-ctl audit show   --log <f> [filtros] [--json]  # Busca/filtra entradas
-//	broker-ctl audit verify --log <f> [--key seed]        # Verifica integridad de cadena
+//	broker-ctl host add    [flags]          # Add or update a host
+//	broker-ctl host list   [--config f]     # List configured hosts
+//	broker-ctl host remove [--config f] <name>
+//	broker-ctl reload      [--config f] [flags]           # Reload signer
+//	broker-ctl audit tail   --log <f> [-n N]              # Follow log in real time
+//	broker-ctl audit show   --log <f> [filters] [--json]  # Search/filter entries
+//	broker-ctl audit verify --log <f> [--key seed]        # Verify chain integrity
 package main
 
 import (
@@ -56,36 +56,36 @@ func main() {
 	case "help", "--help", "-h":
 		usageTop()
 	default:
-		fmt.Fprintf(os.Stderr, "subcomando desconocido: %q\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand: %q\n", os.Args[1])
 		usageTop()
 		os.Exit(1)
 	}
 }
 
 func usageTop() {
-	fmt.Fprintln(os.Stderr, `broker-ctl — gestión de configuración del SSH broker
+	fmt.Fprintln(os.Stderr, `broker-ctl — SSH broker configuration management
 
-Uso:
-  broker-ctl host add    [--config f] [flags]      Añade o actualiza un host
-  broker-ctl host list   [--config f]              Lista hosts configurados
-  broker-ctl host remove [--config f] <nombre>     Elimina un host
-  broker-ctl reload      [--config f] [flags]      Recarga el signer
-  broker-ctl approval list  [flags]                Lista solicitudes de aprobación (control plane)
-  broker-ctl approval allow <id> [flags]           Aprueba una solicitud
-  broker-ctl approval deny  <id> [flags]           Deniega una solicitud
-  broker-ctl audit tail   --log <f> [-n N]         Sigue el log de auditoría en tiempo real
-  broker-ctl audit show   --log <f> [filtros]      Busca y filtra entradas del log
-  broker-ctl audit verify --log <f> [--key seed]   Verifica la integridad de la cadena
+Usage:
+  broker-ctl host add    [--config f] [flags]      Add or update a host
+  broker-ctl host list   [--config f]              List configured hosts
+  broker-ctl host remove [--config f] <name>       Remove a host
+  broker-ctl reload      [--config f] [flags]      Reload the signer
+  broker-ctl approval list  [flags]                List approval requests (control plane)
+  broker-ctl approval allow <id> [flags]           Approve a request
+  broker-ctl approval deny  <id> [flags]           Deny a request
+  broker-ctl audit tail   --log <f> [-n N]         Follow audit log in real time
+  broker-ctl audit show   --log <f> [filters]      Search and filter log entries
+  broker-ctl audit verify --log <f> [--key seed]   Verify chain integrity
 
-Opciones globales:
-  --config   Ruta a signer.json (default: ./signer.json)`)
+Global options:
+  --config   Path to signer.json (default: ./signer.json)`)
 }
 
 // ── host ──────────────────────────────────────────────────────────────────────
 
 func cmdHost(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Uso: broker-ctl host {add|list|remove} [args]")
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl host {add|list|remove} [args]")
 		os.Exit(1)
 	}
 	switch args[0] {
@@ -96,32 +96,32 @@ func cmdHost(args []string) {
 	case "remove", "rm", "del":
 		cmdHostRemove(args[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "subcomando host desconocido: %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown host subcommand: %q\n", args[0])
 		os.Exit(1)
 	}
 }
 
 func cmdHostAdd(args []string) {
 	fs := flag.NewFlagSet("host add", flag.ExitOnError)
-	config := fs.String("config", defaultConfig, "ruta a signer.json")
-	name := fs.String("name", "", "nombre lógico del host (obligatorio)")
-	addr := fs.String("addr", "", "host:port del servidor SSH (obligatorio)")
-	user := fs.String("user", "", "cuenta SSH remota (obligatorio)")
-	hostKey := fs.String("host-key", "", "host key en formato authorized_keys (o '-' para stdin)")
-	scan := fs.Bool("scan", false, "obtener host key automáticamente con ssh-keyscan")
-	principal := fs.String("principal", "", "principal SSH en el cert (default: host:<name>)")
+	config := fs.String("config", defaultConfig, "path to signer.json")
+	name := fs.String("name", "", "logical host name (required)")
+	addr := fs.String("addr", "", "host:port of the SSH server (required)")
+	user := fs.String("user", "", "remote SSH account (required)")
+	hostKey := fs.String("host-key", "", "host key in authorized_keys format (or '-' to read from stdin)")
+	scan := fs.Bool("scan", false, "fetch host key automatically with ssh-keyscan")
+	principal := fs.String("principal", "", "SSH principal in the cert (default: host:<name>)")
 	ttl := fs.Int("ttl", 120, "max_ttl_seconds")
-	jump := fs.String("jump", "", "nombre lógico del bastión previo")
-	sourceAddr := fs.String("source-address", "", "IP/CIDR de egreso del bastión")
+	jump := fs.String("jump", "", "logical name of the preceding bastion")
+	sourceAddr := fs.String("source-address", "", "bastion egress IP/CIDR")
 	allowSudo := fs.Bool("sudo", false, "allow_sudo=true")
-	sudoUsers := fs.String("sudo-users", "", "allowed_sudo_users separados por comas")
+	sudoUsers := fs.String("sudo-users", "", "allowed_sudo_users comma-separated")
 	allowPTY := fs.Bool("pty", false, "allow_pty=true")
-	groups := fs.String("groups", "", "grupos RBAC separados por comas")
-	callers := fs.String("callers", "", "CNs permitidos separados por comas")
+	groups := fs.String("groups", "", "RBAC groups comma-separated")
+	callers := fs.String("callers", "", "allowed CNs comma-separated")
 	bastion := fs.Bool("bastion", false, "allow_as_bastion=true")
-	force := fs.Bool("force", false, "sobrescribir si ya existe")
+	force := fs.Bool("force", false, "overwrite if already exists")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Uso: broker-ctl host add --name <n> --addr <h:p> --user <u> {--host-key <k>|--scan} [flags]")
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl host add --name <n> --addr <h:p> --user <u> {--host-key <k>|--scan} [flags]")
 		fs.PrintDefaults()
 	}
 	must(fs.Parse(args))
@@ -131,12 +131,12 @@ func cmdHostAdd(args []string) {
 		os.Exit(1)
 	}
 	if !*scan && *hostKey == "" {
-		fmt.Fprintln(os.Stderr, "error: se requiere --host-key o --scan")
+		fmt.Fprintln(os.Stderr, "error: --host-key or --scan is required")
 		fs.Usage()
 		os.Exit(1)
 	}
 	if *scan && *hostKey != "" {
-		fmt.Fprintln(os.Stderr, "error: --host-key y --scan son excluyentes")
+		fmt.Fprintln(os.Stderr, "error: --host-key and --scan are mutually exclusive")
 		os.Exit(1)
 	}
 
@@ -151,7 +151,7 @@ func cmdHostAdd(args []string) {
 	} else if *hostKey == "-" {
 		var buf bytes.Buffer
 		if _, err := buf.ReadFrom(os.Stdin); err != nil {
-			fatalf("leer stdin: %v", err)
+			fatalf("reading stdin: %v", err)
 		}
 		hk = strings.TrimSpace(buf.String())
 	} else {
@@ -196,45 +196,45 @@ func cmdHostAdd(args []string) {
 
 	raw, err := loadRaw(*config)
 	if err != nil {
-		fatalf("leer config: %v", err)
+		fatalf("reading config: %v", err)
 	}
 
 	hosts, err := extractHosts(raw)
 	if err != nil {
-		fatalf("parsear hosts: %v", err)
+		fatalf("parsing hosts: %v", err)
 	}
 	if _, exists := hosts[*name]; exists && !*force {
-		fatalf("host %q ya existe (usa --force para sobrescribir)", *name)
+		fatalf("host %q already exists (use --force to overwrite)", *name)
 	}
 
 	hosts[*name] = hp
 	if err := writeHosts(*config, raw, hosts); err != nil {
-		fatalf("escribir config: %v", err)
+		fatalf("writing config: %v", err)
 	}
 
-	action := "añadido"
+	action := "added"
 	if _, exists := hosts[*name]; exists && *force {
-		action = "actualizado"
+		action = "updated"
 	}
 	fmt.Printf("host %q %s (addr=%s, user=%s, principal=%s)\n", *name, action, *addr, *user, *principal)
 }
 
 func cmdHostList(args []string) {
 	fs := flag.NewFlagSet("host list", flag.ExitOnError)
-	config := fs.String("config", defaultConfig, "ruta a signer.json")
+	config := fs.String("config", defaultConfig, "path to signer.json")
 	must(fs.Parse(args))
 
 	raw, err := loadRaw(*config)
 	if err != nil {
-		fatalf("leer config: %v", err)
+		fatalf("reading config: %v", err)
 	}
 	hosts, err := extractHosts(raw)
 	if err != nil {
-		fatalf("parsear hosts: %v", err)
+		fatalf("parsing hosts: %v", err)
 	}
 
 	if len(hosts) == 0 {
-		fmt.Println("(no hay hosts configurados)")
+		fmt.Println("(no hosts configured)")
 		return
 	}
 
@@ -264,9 +264,9 @@ func cmdHostList(args []string) {
 
 func cmdHostRemove(args []string) {
 	fs := flag.NewFlagSet("host remove", flag.ExitOnError)
-	config := fs.String("config", defaultConfig, "ruta a signer.json")
+	config := fs.String("config", defaultConfig, "path to signer.json")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Uso: broker-ctl host remove [--config f] <nombre>")
+		fmt.Fprintln(os.Stderr, "Usage: broker-ctl host remove [--config f] <name>")
 	}
 	must(fs.Parse(args))
 
@@ -278,49 +278,49 @@ func cmdHostRemove(args []string) {
 
 	raw, err := loadRaw(*config)
 	if err != nil {
-		fatalf("leer config: %v", err)
+		fatalf("reading config: %v", err)
 	}
 	hosts, err := extractHosts(raw)
 	if err != nil {
-		fatalf("parsear hosts: %v", err)
+		fatalf("parsing hosts: %v", err)
 	}
 	if _, exists := hosts[name]; !exists {
-		fatalf("host %q no encontrado", name)
+		fatalf("host %q not found", name)
 	}
 
 	delete(hosts, name)
 	if err := writeHosts(*config, raw, hosts); err != nil {
-		fatalf("escribir config: %v", err)
+		fatalf("writing config: %v", err)
 	}
-	fmt.Printf("host %q eliminado\n", name)
+	fmt.Printf("host %q removed\n", name)
 }
 
 // ── reload ────────────────────────────────────────────────────────────────────
 
 func cmdReload(args []string) {
 	fs := flag.NewFlagSet("reload", flag.ExitOnError)
-	config := fs.String("config", defaultConfig, "ruta a signer.json")
-	pidFile := fs.String("pid-file", "./signer.pid", "ruta al PID file del signer")
-	cert := fs.String("cert", "./pki/broker.crt", "cert cliente mTLS para /v1/reload")
-	key := fs.String("key", "./pki/broker.key", "clave cliente mTLS")
-	ca := fs.String("ca", "./pki/mtls_ca.crt", "CA mTLS")
+	config := fs.String("config", defaultConfig, "path to signer.json")
+	pidFile := fs.String("pid-file", "./signer.pid", "path to signer PID file")
+	cert := fs.String("cert", "./pki/broker.crt", "mTLS client cert for /v1/reload")
+	key := fs.String("key", "./pki/broker.key", "mTLS client key")
+	ca := fs.String("ca", "./pki/mtls_ca.crt", "mTLS CA")
 	must(fs.Parse(args))
 
-	// Intentar SIGHUP local primero.
+	// Try local SIGHUP first.
 	if pid, err := readPID(*pidFile); err == nil {
 		if isAlive(pid) {
 			if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
-				fatalf("SIGHUP a PID %d: %v", pid, err)
+				fatalf("SIGHUP to PID %d: %v", pid, err)
 			}
-			fmt.Printf("SIGHUP enviado al signer (PID %d)\n", pid)
+			fmt.Printf("SIGHUP sent to signer (PID %d)\n", pid)
 			return
 		}
 	}
 
-	// Fallback: POST /v1/reload vía mTLS.
+	// Fallback: POST /v1/reload via mTLS.
 	signerURL, err := readSignerURL(*config)
 	if err != nil {
-		fatalf("leer URL del signer desde config: %v", err)
+		fatalf("reading signer URL from config: %v", err)
 	}
 	url := "https://" + signerURL + "/v1/reload"
 
@@ -347,9 +347,9 @@ func cmdReload(args []string) {
 		fatalf("parsear respuesta: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		fatalf("signer rechazó recarga (HTTP %d): %s", resp.StatusCode, result.Error)
+		fatalf("signer rejected reload (HTTP %d): %s", resp.StatusCode, result.Error)
 	}
-	fmt.Printf("signer recargado vía HTTP (hosts: %d)\n", result.Hosts)
+	fmt.Printf("signer reloaded via HTTP (hosts: %d)\n", result.Hosts)
 }
 
 // ── approval (control plane) ────────────────────────────────────────────────────
@@ -366,16 +366,16 @@ func cmdApproval(args []string) {
 	case "deny", "reject":
 		cmdApprovalDecide(args[1:], false)
 	default:
-		fatalf("subcomando de approval desconocido: %q (list|allow|deny)", args[0])
+		fatalf("unknown approval subcommand: %q (list|allow|deny)", args[0])
 	}
 }
 
 // approvalFlags registra los flags mTLS comunes hacia el control plane.
 func approvalFlags(fs *flag.FlagSet) (url, cert, key, ca *string) {
-	url = fs.String("url", "127.0.0.1:7443", "host:puerto del control plane")
-	cert = fs.String("cert", "./pki/broker-admin.crt", "cert cliente mTLS (aprobador)")
-	key = fs.String("key", "./pki/broker-admin.key", "clave cliente mTLS")
-	ca = fs.String("ca", "./pki/mtls_ca.crt", "CA mTLS")
+	url = fs.String("url", "127.0.0.1:7443", "host:port of the control plane")
+	cert = fs.String("cert", "./pki/broker-admin.crt", "mTLS client cert (approver)")
+	key = fs.String("key", "./pki/broker-admin.key", "mTLS client key")
+	ca = fs.String("ca", "./pki/mtls_ca.crt", "mTLS CA")
 	return
 }
 
@@ -390,7 +390,7 @@ func approvalClient(cert, key, ca string) *http.Client {
 func cmdApprovalList(args []string) {
 	fs := flag.NewFlagSet("approval list", flag.ExitOnError)
 	url, cert, key, ca := approvalFlags(fs)
-	asJSON := fs.Bool("json", false, "salida JSON cruda")
+	asJSON := fs.Bool("json", false, "raw JSON output")
 	must(fs.Parse(args))
 
 	client := approvalClient(*cert, *key, *ca)
@@ -401,7 +401,7 @@ func cmdApprovalList(args []string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		fatalf("control plane devolvió %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+		fatalf("control plane returned %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
 	if *asJSON {
 		fmt.Println(string(body))
@@ -421,7 +421,7 @@ func cmdApprovalList(args []string) {
 		fatalf("parsear respuesta: %v", err)
 	}
 	if len(items) == 0 {
-		fmt.Println("(sin solicitudes)")
+		fmt.Println("(no pending requests)")
 		return
 	}
 	for _, it := range items {
@@ -439,7 +439,7 @@ func cmdApprovalDecide(args []string, approve bool) {
 	url, cert, key, ca := approvalFlags(fs)
 	must(fs.Parse(args))
 	if fs.NArg() < 1 {
-		fatalf("falta el id de la solicitud")
+		fatalf("missing request id")
 	}
 	id := fs.Arg(0)
 
@@ -452,18 +452,18 @@ func cmdApprovalDecide(args []string, approve bool) {
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		fatalf("control plane rechazó la decisión (HTTP %d): %s", resp.StatusCode, bytes.TrimSpace(rb))
+		fatalf("control plane rejected decision (HTTP %d): %s", resp.StatusCode, bytes.TrimSpace(rb))
 	}
-	verb := "denegada"
+	verb := "denied"
 	if approve {
-		verb = "aprobada"
+		verb = "approved"
 	}
-	fmt.Printf("solicitud %s %s\n", id, verb)
+	fmt.Printf("request %s %s\n", id, verb)
 }
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
 
-// hostEntry es la representación JSON de un host en signer.json.
+// hostEntry is the JSON representation of a host in signer.json.
 type hostEntry struct {
 	Addr             string   `json:"addr"`
 	User             string   `json:"user"`
@@ -480,7 +480,7 @@ type hostEntry struct {
 	Groups           []string `json:"groups,omitempty"`
 }
 
-// loadRaw lee signer.json como mapa de RawMessage para preservar campos desconocidos.
+// loadRaw reads signer.json as a RawMessage map to preserve unknown fields.
 func loadRaw(path string) (map[string]json.RawMessage, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -488,12 +488,12 @@ func loadRaw(path string) (map[string]json.RawMessage, error) {
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("JSON inválido: %w", err)
+		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 	return raw, nil
 }
 
-// extractHosts extrae y parsea la clave "hosts" del raw map.
+// extractHosts extracts and parses the "hosts" key from the raw map.
 func extractHosts(raw map[string]json.RawMessage) (map[string]hostEntry, error) {
 	hostsRaw, ok := raw["hosts"]
 	if !ok {
@@ -509,7 +509,7 @@ func extractHosts(raw map[string]json.RawMessage) (map[string]hostEntry, error) 
 	return hosts, nil
 }
 
-// writeHosts serializa hosts de vuelta al raw map y escribe el archivo.
+// writeHosts serialises hosts back into the raw map and writes the file.
 func writeHosts(path string, raw map[string]json.RawMessage, hosts map[string]hostEntry) error {
 	hostsJSON, err := json.MarshalIndent(hosts, "  ", "  ")
 	if err != nil {
@@ -521,7 +521,7 @@ func writeHosts(path string, raw map[string]json.RawMessage, hosts map[string]ho
 	if err != nil {
 		return err
 	}
-	// Escritura atómica: escribir a temp y renombrar.
+	// Atomic write: write to temp and rename.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, append(out, '\n'), 0640); err != nil {
 		return err
@@ -529,7 +529,7 @@ func writeHosts(path string, raw map[string]json.RawMessage, hosts map[string]ho
 	return os.Rename(tmp, path)
 }
 
-// readSignerURL extrae el campo "listen" de signer.json para construir la URL HTTP.
+// readSignerURL extracts the "listen" field from signer.json to build the HTTP URL.
 func readSignerURL(configPath string) (string, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -542,9 +542,9 @@ func readSignerURL(configPath string) (string, error) {
 		return "", err
 	}
 	if cfg.Listen == "" {
-		return "", errors.New("campo 'listen' vacío en signer.json")
+		return "", errors.New("'listen' field empty in signer.json")
 	}
-	// Si listen es ":9443" (sin host), usar 127.0.0.1.
+	// If listen is ":9443" (no host), use 127.0.0.1.
 	if strings.HasPrefix(cfg.Listen, ":") {
 		return "127.0.0.1" + cfg.Listen, nil
 	}
@@ -556,15 +556,15 @@ func readSignerURL(configPath string) (string, error) {
 func buildTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("cargar cert cliente: %w", err)
+		return nil, fmt.Errorf("loading client cert: %w", err)
 	}
 	caData, err := os.ReadFile(caFile)
 	if err != nil {
-		return nil, fmt.Errorf("leer CA: %w", err)
+		return nil, fmt.Errorf("reading CA: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caData) {
-		return nil, errors.New("CA PEM inválido")
+		return nil, errors.New("invalid CA PEM")
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -579,7 +579,7 @@ func readPID(pidFile string) (int, error) {
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		return 0, fmt.Errorf("PID inválido en %s: %w", pidFile, err)
+		return 0, fmt.Errorf("invalid PID in %s: %w", pidFile, err)
 	}
 	return pid, nil
 }
@@ -588,25 +588,25 @@ func isAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
-// sshKeyscan ejecuta ssh-keyscan y extrae la primera línea ed25519.
+// sshKeyscan runs ssh-keyscan and extracts the first ed25519 line.
 func sshKeyscan(host string) (string, error) {
 	out, err := exec.Command("ssh-keyscan", "-t", "ed25519", host).Output()
 	if err != nil {
-		return "", fmt.Errorf("ssh-keyscan falló: %w", err)
+		return "", fmt.Errorf("ssh-keyscan failed: %w", err)
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Formato: "hostname ssh-ed25519 AAAA..."
-		// Eliminar el prefijo del hostname.
+		// Format: "hostname ssh-ed25519 AAAA..."
+		// Strip the hostname prefix.
 		parts := strings.Fields(line)
 		if len(parts) >= 3 {
 			return strings.Join(parts[1:], " "), nil
 		}
 	}
-	return "", fmt.Errorf("ssh-keyscan no devolvió una clave ed25519 para %s", host)
+	return "", fmt.Errorf("ssh-keyscan returned no ed25519 key for %s", host)
 }
 
 // ── misc ──────────────────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
-// Command signer es el servicio de firma externo: custodia la clave de CA y la
-// política, y emite certificados SSH efímeros a brokers autenticados por mTLS. El
-// broker nunca tiene la clave de CA; manda una intención y recibe el cert firmado.
+// Command signer is the external signing service: it holds the CA key and the
+// policy, and issues ephemeral SSH certificates to mTLS-authenticated brokers.
+// The broker never holds the CA key; it sends an intent and receives the signed
+// certificate.
 //
-// El cuerpo del servicio es un signer.Local expuesto por HTTP+mTLS, con su propio
-// log de emisión (auditoría independiente del broker).
+// The service core is a signer.Local exposed over HTTP+mTLS, with its own
+// issuance log (audit independent of the broker).
 package main
 
 import (
@@ -27,50 +28,50 @@ import (
 	"github.com/luisgf/ssh-broker/internal/signer"
 )
 
-// Config del servicio de firma.
+// Config is the signing service configuration.
 type Config struct {
-	Listen string `json:"listen"` // p. ej. ":9443"
+	Listen string `json:"listen"` // e.g. ":9443"
 
-	// mTLS del servicio: presenta server_cert y exige clientes firmados por client_ca.
+	// mTLS: presents server_cert and requires clients signed by client_ca.
 	ServerCert string `json:"server_cert"`
 	ServerKey  string `json:"server_key"`
-	ClientCA   string `json:"client_ca"` // CA que firma a los brokers autorizados
+	ClientCA   string `json:"client_ca"` // CA that signs authorised brokers
 
-	// Custodia de la clave de CA. PEM por ahora; sustituible por crypto.Signer de
-	// KMS/Secure Enclave/HSM sin tocar el resto (ca.LoadCAFromPEM -> ssh.Signer).
+	// CA key custody. PEM for now; replaceable with a crypto.Signer from
+	// KMS/Secure Enclave/HSM without touching anything else
+	// (ca.LoadCAFromPEM → ssh.Signer).
 	CAKey string `json:"ca_key"`
 
-	// Auditoría de emisión (independiente del broker).
+	// Issuance audit log (independent of the broker).
 	AuditLog string `json:"audit_log"`
 	AuditKey string `json:"audit_key"`
 
-	// MaxTTLSeconds: tope global si la política del host no fija uno.
+	// MaxTTLSeconds: global cap when the host policy does not set one.
 	MaxTTLSeconds int `json:"max_ttl_seconds"`
 
-	// ReloadCallers: CNs (de cert de cliente) autorizados a invocar POST
-	// /v1/reload. Si está vacío, el endpoint HTTP queda deshabilitado (403);
-	// SIGHUP sigue funcionando porque es local al host.
+	// ReloadCallers: client cert CNs authorised to invoke POST /v1/reload.
+	// Empty = HTTP endpoint disabled (403); SIGHUP still works locally.
 	ReloadCallers []string `json:"reload_callers"`
 
-	// TrustedForwarders: CNs (de cert de cliente) autorizados a actuar en nombre
-	// de otro broker (campo on_behalf_of / cabecera X-On-Behalf-Of). Es el CN del
-	// control plane. Solo estos CNs pueden suplantar la identidad del broker para
-	// RBAC; cualquier otro que mande on_behalf_of es rechazado.
+	// TrustedForwarders: client cert CNs authorised to act on behalf of another
+	// broker (on_behalf_of field / X-On-Behalf-Of header). This is the control
+	// plane CN. Only these CNs may impersonate a broker for RBAC; any other CN
+	// sending on_behalf_of is rejected.
 	TrustedForwarders []string `json:"trusted_forwarders,omitempty"`
 
-	// Hosts: política de emisión + conectividad por host. Es la única fuente de
-	// verdad: el broker obtiene addr/user/host_key/jump vía GET /v1/hosts.
+	// Hosts: issuance policy + connectivity per host. Single source of truth:
+	// the broker fetches addr/user/host_key/jump via GET /v1/hosts.
 	Hosts signer.PolicyTable `json:"hosts"`
 
-	// Callers: RBAC por grupos. Mapea CN del cert mTLS del broker → grupos permitidos.
-	// Un CN ausente no tiene restricción de grupo (backward compatible).
-	// Un CN presente solo puede ver y firmar hosts cuyo campo groups intersecte
-	// con sus allowed_groups.
+	// Callers: group-based RBAC. Maps broker mTLS cert CN → allowed groups.
+	// A CN absent from the table has no group restriction (backward compatible).
+	// A CN present can only see and sign hosts whose groups field intersects
+	// with its allowed_groups.
 	Callers signer.CallerTable `json:"callers,omitempty"`
 }
 
 func main() {
-	cfgPath := flag.String("config", "signer.json", "ruta al fichero de configuración JSON")
+	cfgPath := flag.String("config", "signer.json", "path to JSON configuration file")
 	flag.Parse()
 
 	cfg, err := loadConfig(*cfgPath)
@@ -85,14 +86,14 @@ func main() {
 
 	seed, err := os.ReadFile(cfg.AuditKey)
 	if err != nil {
-		log.Fatalf("leer clave de auditoría: %v", err)
+		log.Fatalf("reading audit key: %v", err)
 	}
 	if len(seed) < ed25519.SeedSize {
-		log.Fatalf("clave de auditoría demasiado corta")
+		log.Fatalf("audit key too short")
 	}
 	auditLog, err := audit.Open(cfg.AuditLog, ed25519.NewKeyFromSeed(seed[:ed25519.SeedSize]))
 	if err != nil {
-		log.Fatalf("auditoría: %v", err)
+		log.Fatalf("audit: %v", err)
 	}
 	defer auditLog.Close()
 
@@ -115,24 +116,24 @@ func main() {
 	mux.HandleFunc("/v1/hosts", srv.handleHosts)
 	mux.HandleFunc("/v1/reload", srv.handleReload)
 
-	// Recarga en caliente vía SIGHUP (además del endpoint HTTP). Es local al
-	// host, por eso no pasa por la allowlist de reload_callers.
+	// Hot-reload via SIGHUP (in addition to the HTTP endpoint). Local to the
+	// host, so it bypasses the reload_callers allowlist.
 	go func() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGHUP)
 		for range ch {
 			n, err := srv.reload()
 			if err != nil {
-				log.Printf("reload (SIGHUP): error: %v (se conserva la config anterior)", err)
+				log.Printf("reload (SIGHUP): error: %v (keeping previous config)", err)
 				srv.auditReload("SIGHUP", 0, "reload-failed", err)
 				continue
 			}
-			log.Printf("reload (SIGHUP): %d hosts en política", n)
+			log.Printf("reload (SIGHUP): %d hosts in policy", n)
 			srv.auditReload("SIGHUP", n, "reloaded", nil)
 		}
 	}()
 
-	// A1: timeouts para evitar agotamiento de conexiones (slowloris y conexiones colgadas).
+	// A1: timeouts to prevent connection exhaustion (slowloris and hung connections).
 	httpSrv := &http.Server{
 		Addr:         cfg.Listen,
 		Handler:      mux,
@@ -141,22 +142,22 @@ func main() {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	log.Printf("signer (mTLS) en %s; %d hosts en política", cfg.Listen, len(cfg.Hosts))
+	log.Printf("signer (mTLS) on %s; %d hosts in policy", cfg.Listen, len(cfg.Hosts))
 	log.Fatal(httpSrv.ListenAndServeTLS("", ""))
 }
 
-// buildState construye el estado recargable (firmante + política de hosts) a
-// partir de la config: lee la clave de CA del fichero y materializa el TTL por
-// defecto. Devuelve error sin tocar nada si algo falla, de modo que un reload
-// inválido no deja el signer en estado roto.
+// buildState constructs the hot-reloadable state (signer + host policy) from
+// the config: reads the CA key from disk and materialises the default TTL.
+// Returns an error without touching anything on failure, so an invalid reload
+// does not leave the signer in a broken state.
 func buildState(cfg *Config) (*signer.Local, error) {
 	caPEM, err := os.ReadFile(cfg.CAKey)
 	if err != nil {
-		return nil, fmt.Errorf("leer clave de CA: %w", err)
+		return nil, fmt.Errorf("reading CA key: %w", err)
 	}
 	caKey, err := ca.LoadCAFromPEM(caPEM)
 	if err != nil {
-		return nil, fmt.Errorf("clave de CA: %w", err)
+		return nil, fmt.Errorf("CA key: %w", err)
 	}
 	defaultTTL := time.Duration(cfg.MaxTTLSeconds) * time.Second
 	if defaultTTL <= 0 {
@@ -165,7 +166,7 @@ func buildState(cfg *Config) (*signer.Local, error) {
 	return signer.NewLocal(caKey, cfg.Hosts, defaultTTL), nil
 }
 
-// reloadSet convierte la lista de CNs admin en un conjunto para lookup O(1).
+// reloadSet converts the list of admin CNs into a set for O(1) lookup.
 func reloadSet(cns []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(cns))
 	for _, cn := range cns {
@@ -177,7 +178,7 @@ func reloadSet(cns []string) map[string]struct{} {
 }
 
 type server struct {
-	// mu protege el estado recargable en caliente.
+	// mu protects hot-reloadable state.
 	mu         sync.RWMutex
 	local      *signer.Local
 	hosts      signer.PolicyTable
@@ -185,22 +186,22 @@ type server struct {
 	reloadCN   map[string]struct{}
 	forwarders map[string]struct{}
 
-	// Inmutables tras el arranque.
+	// Immutable after startup.
 	audit   *audit.Log
 	cfgPath string
 }
 
-// snapshot devuelve el estado vigente bajo RLock, para que los handlers no lean
-// los campos mientras un reload los está sustituyendo.
+// snapshot returns the current state under RLock, so handlers do not read
+// fields while a reload is replacing them.
 func (s *server) snapshot() (*signer.Local, signer.PolicyTable, signer.CallerTable, map[string]struct{}) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.local, s.hosts, s.callers, s.forwarders
 }
 
-// resolveCaller determina la identidad efectiva para RBAC. Si onBehalfOf no es
-// vacío, solo se honra cuando mtlsCN es un forwarder de confianza; en otro caso
-// devuelve ok=false (la petición debe rechazarse con 403).
+// resolveCaller determines the effective caller identity for RBAC. When
+// onBehalfOf is non-empty, it is honoured only if mtlsCN is a trusted
+// forwarder; otherwise ok=false (the request must be rejected with 403).
 func resolveCaller(mtlsCN, onBehalfOf string, forwarders map[string]struct{}) (caller string, ok bool) {
 	if onBehalfOf == "" {
 		return mtlsCN, true
@@ -211,9 +212,9 @@ func resolveCaller(mtlsCN, onBehalfOf string, forwarders map[string]struct{}) (c
 	return "", false
 }
 
-// reload relee el fichero de config y, si es válido, sustituye atómicamente el
-// firmante, la política de hosts y la allowlist de reload. Si algo falla, no
-// modifica el estado y devuelve error. Devuelve el número de hosts cargados.
+// reload re-reads the config file and, if valid, atomically replaces the
+// signer, the host policy, and the reload allowlist. On failure it leaves the
+// state unchanged and returns an error. Returns the number of loaded hosts.
 func (s *server) reload() (int, error) {
 	cfg, err := loadConfig(s.cfgPath)
 	if err != nil {
@@ -235,49 +236,49 @@ func (s *server) reload() (int, error) {
 
 func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	caller, err := auth.CallerCN(r)
 	if err != nil {
-		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 
-	// A2: limitar el tamaño del cuerpo para evitar OOM por payloads gigantes.
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // 64 KiB es más que suficiente
+	// A2: limit the request body to prevent OOM from oversized payloads.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024) // 64 KiB is more than enough
 	var req signer.WireRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "petición inválida", http.StatusBadRequest)
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
 	pub, err := signer.ParsePublicKey(req.PublicKey)
 	if err != nil {
-		http.Error(w, "pubkey inválida", http.StatusBadRequest)
+		http.Error(w, "invalid pubkey", http.StatusBadRequest)
 		return
 	}
 
 	local, hosts, callers, forwarders := s.snapshot()
 
-	// approved solo se honra desde un forwarder de confianza (control plane); un
-	// broker no puede auto-aprobarse.
+	// approved is honoured only from a trusted forwarder (control plane); a
+	// broker cannot self-approve.
 	_, isForwarder := forwarders[caller]
 	effectiveApproved := req.Approved && isForwarder
 
-	// Resolver identidad efectiva: un forwarder de confianza (control plane) puede
-	// actuar en nombre del broker original vía on_behalf_of.
+	// Resolve the effective caller identity: a trusted forwarder (control plane)
+	// may act on behalf of the original broker via on_behalf_of.
 	caller, ok := resolveCaller(caller, req.OnBehalfOf, forwarders)
 	if !ok {
-		http.Error(w, "on_behalf_of no permitido para este caller", http.StatusForbidden)
+		http.Error(w, "on_behalf_of not allowed for this caller", http.StatusForbidden)
 		return
 	}
 
-	// Verificar acceso por grupo antes de Resolve: si el caller tiene restricción
-	// de grupo, el host solicitado debe pertenecer a alguno de sus grupos.
+	// Verify group access before Resolve: if the caller has a group restriction,
+	// the requested host must belong to one of its groups.
 	if hostSet, restricted := signer.HostSetForCaller(caller, hosts, callers); restricted {
 		if _, ok := hostSet[req.Host]; !ok {
-			s.auditEmission(caller, req, hosts, 0, "denied", fmt.Errorf("host %q fuera del grupo para %q", req.Host, caller))
-			http.Error(w, "host no autorizado", http.StatusForbidden)
+			s.auditEmission(caller, req, hosts, 0, "denied", fmt.Errorf("host %q outside group for %q", req.Host, caller))
+			http.Error(w, "host not authorised", http.StatusForbidden)
 			return
 		}
 	}
@@ -307,10 +308,10 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 	s.respondSignResult(w, caller, req, hosts, issued)
 }
 
-// respondSignResult audita el resultado de una firma y escribe la respuesta HTTP.
-// Cubre los tres casos: dry-run, approval-required y cert emitido.
+// respondSignResult audits the signing result and writes the HTTP response.
+// Covers three cases: dry-run, approval-required, and cert issued.
 func (s *server) respondSignResult(w http.ResponseWriter, caller string, req signer.WireRequest, hosts signer.PolicyTable, issued *signer.Issued) {
-	// Dry-run: no se emite certificado; se devuelve solo la decisión y se audita.
+	// Dry-run: no cert issued; only the decision is returned and audited.
 	if req.DryRun {
 		outcome := "dry_run_allowed"
 		if issued.Decision != nil && !issued.Decision.Allowed {
@@ -321,9 +322,9 @@ func (s *server) respondSignResult(w http.ResponseWriter, caller string, req sig
 		return
 	}
 
-	// Sin certificado pero permitido: la operación requiere aprobación humana y no
-	// ha sido aprobada. Se devuelve la decisión (cert vacío) para que el control
-	// plane orqueste la aprobación.
+	// No certificate but allowed: the operation requires human approval and has
+	// not been approved yet. Return the decision (empty cert) so the control
+	// plane can orchestrate approval.
 	if issued.Certificate == nil {
 		s.auditEmission(caller, req, hosts, 0, "approval-required", nil)
 		writeJSON(w, http.StatusOK, signer.WireResponse{Decision: issued.Decision})
@@ -339,28 +340,28 @@ func (s *server) respondSignResult(w http.ResponseWriter, caller string, req sig
 	})
 }
 
-// handleHosts sirve GET /v1/hosts: devuelve los datos de conectividad de los
-// hosts accesibles al caller. Si el caller tiene restricción de grupos, solo
-// recibe los hosts cuyo campo groups intersecta con sus allowed_groups.
-// No expone datos de política (principal, source_address, allowed_callers).
+// handleHosts serves GET /v1/hosts: returns the connectivity data for the
+// hosts accessible to the caller. Callers with a group restriction receive
+// only hosts whose groups field intersects with their allowed_groups.
+// Does not expose policy data (principal, source_address, allowed_callers).
 func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	caller, err := auth.CallerCN(r)
 	if err != nil {
-		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 
 	_, hosts, callers, forwarders := s.snapshot()
 
-	// Un forwarder de confianza puede pedir la lista en nombre de un broker
-	// (cabecera X-On-Behalf-Of) para que el filtrado por grupos sea el del broker.
+	// A trusted forwarder can request the list on behalf of a broker
+	// (X-On-Behalf-Of header) so that group filtering matches the broker.
 	caller, ok := resolveCaller(caller, r.Header.Get(signer.HeaderOnBehalfOf), forwarders)
 	if !ok {
-		http.Error(w, "on_behalf_of no permitido para este caller", http.StatusForbidden)
+		http.Error(w, "on_behalf_of not allowed for this caller", http.StatusForbidden)
 		return
 	}
 
@@ -376,7 +377,7 @@ func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Filtrar por grupos si el caller tiene restricción.
+	// Filter by groups if the caller has a restriction.
 	if hostSet, restricted := signer.HostSetForCaller(caller, hosts, callers); restricted {
 		for name := range result {
 			if _, ok := hostSet[name]; !ok {
@@ -388,18 +389,18 @@ func (s *server) handleHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleReload sirve POST /v1/reload: relee el fichero de configuración y
-// sustituye en caliente la política de hosts, el TTL global y la clave de CA.
-// Solo CNs en reload_callers pueden invocarlo. Si la nueva config es inválida,
-// el estado anterior se conserva intacto y se devuelve 500.
+// handleReload serves POST /v1/reload: re-reads the config file and hot-swaps
+// the host policy, the global TTL, and the CA key. Only CNs in reload_callers
+// may invoke it. If the new config is invalid, the previous state is preserved
+// and 500 is returned.
 func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "método no permitido", http.StatusMethodNotAllowed)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	caller, err := auth.CallerCN(r)
 	if err != nil {
-		http.Error(w, "no autenticado", http.StatusUnauthorized)
+		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 
@@ -407,8 +408,8 @@ func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 	_, allowed := s.reloadCN[caller]
 	s.mu.RUnlock()
 	if !allowed {
-		s.auditReload(caller, 0, "reload-denied", fmt.Errorf("caller no autorizado"))
-		http.Error(w, "no autorizado para recargar", http.StatusForbidden)
+		s.auditReload(caller, 0, "reload-denied", fmt.Errorf("caller not authorised"))
+		http.Error(w, "not authorised to reload", http.StatusForbidden)
 		return
 	}
 
@@ -422,7 +423,7 @@ func (s *server) handleReload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "hosts": n})
 }
 
-// auditReload registra una operación de recarga en el log de auditoría.
+// auditReload records a reload operation in the audit log.
 func (s *server) auditReload(caller string, hosts int, outcome string, err error) {
 	e := audit.Entry{
 		Caller:  caller,
@@ -432,9 +433,9 @@ func (s *server) auditReload(caller string, hosts int, outcome string, err error
 	if err != nil {
 		e.Err = err.Error()
 	}
-	// M1: registrar el error en lugar de descartarlo silenciosamente.
+	// M1: log the error instead of silently discarding it.
 	if aerr := s.audit.Append(e); aerr != nil {
-		log.Printf("advertencia: error escribiendo audit log del signer: %v", aerr)
+		log.Printf("warning: error writing signer audit log: %v", aerr)
 	}
 }
 
@@ -453,8 +454,8 @@ func (s *server) auditEmission(caller string, req signer.WireRequest, hosts sign
 	if req.PTY {
 		cmd += " pty=1"
 	}
-	// Usar la dirección real (FQDN) y los metadatos de la política en lugar del
-	// nombre lógico, que no identifica unívocamente el destino en el log.
+	// Use the real address (FQDN) and policy metadata instead of the logical
+	// name, which does not uniquely identify the target in the log.
 	host := req.Host
 	var user, principal string
 	if hp, ok := hosts[req.Host]; ok {
@@ -474,9 +475,9 @@ func (s *server) auditEmission(caller string, req signer.WireRequest, hosts sign
 	if err != nil {
 		e.Err = err.Error()
 	}
-	// M1: registrar el error en lugar de descartarlo silenciosamente.
+	// M1: log the error instead of silently discarding it.
 	if aerr := s.audit.Append(e); aerr != nil {
-		log.Printf("advertencia: error escribiendo audit log del signer: %v", aerr)
+		log.Printf("warning: error writing signer audit log: %v", aerr)
 	}
 }
 
@@ -503,7 +504,7 @@ func loadConfig(path string) (*Config, error) {
 	if c.Listen == "" {
 		c.Listen = ":9443"
 	}
-	// Materializa MaxTTL por host desde los segundos del JSON.
+	// Materialise per-host MaxTTL from the JSON seconds value.
 	for name, hp := range c.Hosts {
 		if hp.MaxTTLSeconds > 0 {
 			hp.MaxTTL = time.Duration(hp.MaxTTLSeconds) * time.Second

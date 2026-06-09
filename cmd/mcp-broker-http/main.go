@@ -1,13 +1,13 @@
-// Command mcp-broker-http expone el broker como servidor MCP remoto sobre HTTP
-// (Streamable HTTP) protegido con OAuth2/OIDC, según la especificación de
-// autorización del MCP. Cada cliente se autentica con un bearer token; el broker
-// lo valida localmente contra el JWKS del issuer (sin round-trip por petición) y
-// usa la identidad del usuario para auditoría y para el RBAC por usuario del
+// Command mcp-broker-http exposes the broker as a remote MCP server over HTTP
+// (Streamable HTTP) protected with OAuth2/OIDC, as specified by the MCP
+// authorisation specification. Each client authenticates with a bearer token;
+// the broker validates it locally against the issuer's JWKS (no round-trip per
+// request) and uses the user identity for audit and for per-user RBAC in the
 // signer.
 //
-// A diferencia de cmd/mcp-broker (stdio, local), este frontend está pensado para
-// despliegues multiusuario por red. La credencial SSH efímera nunca sale del
-// proceso; el modelo solo recibe la salida del comando.
+// Unlike cmd/mcp-broker (stdio, local), this frontend is designed for
+// multi-user network deployments. The ephemeral SSH credential never leaves the
+// process; the model only receives the command output.
 package main
 
 import (
@@ -22,17 +22,17 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 
-	mtls "github.com/luisgf/ssh-broker/internal/auth" // alias: evita colisión con go-sdk/auth
+	mtls "github.com/luisgf/ssh-broker/internal/auth" // alias: avoids collision with go-sdk/auth
 	"github.com/luisgf/ssh-broker/internal/broker"
 	"github.com/luisgf/ssh-broker/internal/mcpserver"
 	"github.com/luisgf/ssh-broker/internal/oauth"
 )
 
-// prmPath es la ruta del documento Protected Resource Metadata (RFC 9728).
+// prmPath is the path for the Protected Resource Metadata document (RFC 9728).
 const prmPath = "/.well-known/oauth-protected-resource"
 
 func main() {
-	cfgPath := flag.String("config", "config.json", "ruta al fichero de configuración JSON")
+	cfgPath := flag.String("config", "config.json", "path to JSON configuration file")
 	flag.Parse()
 
 	cfg, err := broker.LoadConfig(*cfgPath)
@@ -40,15 +40,15 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	if cfg.OAuth == nil {
-		log.Fatalf("config: falta el bloque \"oauth\" (requerido por el frontend HTTP)")
+		log.Fatalf("config: missing \"oauth\" block (required by the HTTP frontend)")
 	}
 	if cfg.ResourceURL == "" {
-		log.Fatalf("config: falta \"resource_url\" (URL canónica de este servidor MCP)")
+		log.Fatalf("config: missing \"resource_url\" (canonical URL of this MCP server)")
 	}
 
 	eng, err := broker.NewEngine(cfg)
 	if err != nil {
-		log.Fatalf("inicializar broker: %v", err)
+		log.Fatalf("initialising broker: %v", err)
 	}
 	defer eng.Close()
 
@@ -61,9 +61,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("tls: %v", err)
 	}
-	// A1: timeouts para evitar agotamiento de conexiones (slowloris).
-	// WriteTimeout deliberadamente no establecido: los streams SSE del MCP pueden
-	// estar abiertos mientras dure la respuesta de un comando SSH.
+	// A1: timeouts to prevent connection exhaustion (slowloris).
+	// WriteTimeout deliberately not set: MCP SSE streams may stay open for the
+	// duration of an SSH command response.
 	httpSrv := &http.Server{
 		Addr:        cfg.Listen,
 		Handler:     mux,
@@ -71,13 +71,13 @@ func main() {
 		ReadTimeout: 15 * time.Second,
 		IdleTimeout: 120 * time.Second,
 	}
-	log.Printf("mcp-broker-http (OAuth2/OIDC) en %s; issuer=%s; %d hosts", cfg.Listen, cfg.OAuth.Issuer, len(eng.Servers()))
+	log.Printf("mcp-broker-http (OAuth2/OIDC) on %s; issuer=%s; %d hosts", cfg.Listen, cfg.OAuth.Issuer, len(eng.Servers()))
 	log.Fatal(httpSrv.ListenAndServeTLS("", ""))
 }
 
-// newMux construye el handler HTTP del frontend: el endpoint MCP protegido por
-// bearer token OIDC y el documento Protected Resource Metadata (RFC 9728). Se
-// separa de main para poder probarlo end-to-end sin abrir sockets TLS.
+// newMux builds the HTTP handler for the frontend: the MCP endpoint protected
+// by OIDC bearer token and the Protected Resource Metadata document (RFC 9728).
+// Separated from main so it can be tested end-to-end without opening TLS sockets.
 func newMux(ctx context.Context, eng *broker.Engine, cfg *broker.Config) (*http.ServeMux, error) {
 	verifier, err := oauth.NewVerifier(ctx, oauth.Config{
 		Issuer:         cfg.OAuth.Issuer,
@@ -114,9 +114,9 @@ func newMux(ctx context.Context, eng *broker.Engine, cfg *broker.Config) (*http.
 	return mux, nil
 }
 
-// httpCaller deriva la identidad del llamante del token bearer validado por el
-// middleware. UserID alimenta la auditoría; los grupos (si el token los porta)
-// activan el RBAC por usuario en el signer.
+// httpCaller derives the caller identity from the bearer token validated by the
+// middleware. UserID feeds the audit log; groups (when present in the token)
+// activate per-user RBAC in the signer.
 func httpCaller(ctx context.Context) broker.Caller {
 	ti := auth.TokenInfoFromContext(ctx)
 	if ti == nil {
