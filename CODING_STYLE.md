@@ -278,17 +278,18 @@ go func() {
 
 ## 10. Language
 
+All source code must be in English. No exceptions for legacy code.
+
 | Artifact | Language |
 |---|---|
 | Commit messages | English |
-| New source file comments | English |
+| Go comments (all files, new and existing) | English |
 | New doc files (`*.md`) | English |
-| Existing `HANDOFF.md` / `CHANGELOG.md` | Spanish (legacy — do not change) |
-| Existing Go comments in legacy code | Spanish (do not change on refactors) |
-| New Go comments in new or significantly rewritten functions | English |
+| `HANDOFF.md` / `CHANGELOG.md` | Spanish (operational docs — do not change) |
 
 The rule is: **do not mix languages within a single function or doc block**.
-When rewriting a function completely, convert its comments to English.
+When editing a legacy function that still has Spanish comments, translate them
+in the same commit.
 
 ---
 

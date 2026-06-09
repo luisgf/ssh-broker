@@ -1,5 +1,17 @@
 # Changelog
 
+## [v1.9.3] - 2026-06-09
+
+### Changed
+- All Go source comments, error messages, flag descriptions, and user-visible
+  strings translated from Spanish to English across all packages and binaries
+  (internal/, cmd/, lab/). No behaviour change.
+- `signer.sh` echo strings and inline comments translated to English.
+- `_comment` fields in all example JSON config files translated to English.
+- `CODING_STYLE.md` section 10 updated: English is now required for all Go
+  comments (including legacy code); the previous "do not change on refactors"
+  exception is removed.
+
 ## [v1.9.2] - 2026-06-09
 
 ### Added
