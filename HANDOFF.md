@@ -965,7 +965,7 @@ Incorporado en `README.md` (sección *Comparison with existing solutions*). Resu
 
 ## Estado del plan de pruebas (v1.10.0)
 
-148 casos totales en 11 paquetes. Todos los tests pasan con `go test -race ./...` (sin data races detectados).
+156 casos totales en 12 paquetes. Todos los tests pasan con `go test -race ./...` (sin data races detectados).
 
 | Paquete | Casos | Cobertura | Notas |
 |---|---|---|---|
@@ -975,6 +975,7 @@ Incorporado en `README.md` (sección *Comparison with existing solutions*). Resu
 | `internal/oauth` | 5 | ✅ Completa | valid/expired/wrong-aud/bad-sig/missing-claim |
 | `internal/audit` | 11 | ✅ Completa | cadena hash, firmas Ed25519, restoreChain, maybeRotate |
 | `internal/broker` | 25 | ✅ Completa | sessionManager, límites M2, C1 ownership, M5 newlines |
+| `internal/recording` | 8 | ✅ Completa | cabecera ASCIIcast, tipos de evento, deltas, concurrencia, close |
 | `cmd/control-plane` | 8 | ✅ Completa | forwarding, approval flow, behavior, ownership |
 | `cmd/signer` | 4 | ✅ resolveCaller (4 sub-tests) | handlers HTTP indirectos vía control-plane |
 | `cmd/mcp-broker-http` | 3 | ✅ OAuth auth, 401, RFC 9728 | |
