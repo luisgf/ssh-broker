@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/luisgf/ssh-broker/internal/audit"
+	"github.com/luisgf/ssh-broker/internal/recording"
 	"github.com/luisgf/ssh-broker/internal/signer"
 	sshrun "github.com/luisgf/ssh-broker/internal/ssh"
 )
@@ -43,9 +46,16 @@ type liveSession struct {
 	elevationPrefix string
 	// pty indicates whether this session uses a PTY.
 	pty bool
+	// recorder captures stdin/stdout/stderr to an ASCIIcast v2 file.
+	// nil when session recording is disabled.
+	recorder *recording.Recorder
 }
 
 func (s *liveSession) close() {
+	if s.recorder != nil {
+		_ = s.recorder.Close()
+		s.recorder = nil
+	}
 	if s.shell != nil {
 		_ = s.shell.Close()
 	}
@@ -240,6 +250,29 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "denied", Err: err.Error()})
 		return nil, err
 	}
+
+	// Start recording for shell/pty sessions when a recording directory is set.
+	if e.cfg.SessionRecordingDir != "" && s.shell != nil {
+		castPath := filepath.Join(e.cfg.SessionRecordingDir, s.id+".cast")
+		rec, err := recording.Open(castPath, recording.Meta{
+			SessionID: s.id,
+			Caller:    c.ID,
+			Host:      host,
+			Serial:    serial,
+			PTY:       opts.PTY,
+			Term:      "xterm-256color",
+			Width:     220,
+			Height:    40,
+			StartedAt: s.created,
+		})
+		if err != nil {
+			log.Printf("warning: could not open recording file %s: %v", castPath, err)
+		} else {
+			s.recorder = rec
+			s.shell.SetRecorder(rec)
+		}
+	}
+
 	e.auditE(audit.Entry{
 		Caller:    c.ID,
 		Host:      host,

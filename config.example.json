@@ -18,6 +18,9 @@
   "session_idle_seconds": 300,
   "session_max_seconds": 1800,
 
+  "_recording_comment": "Optional session recording. When set, shell and pty sessions are recorded to ASCIIcast v2 files in this directory. One file per session: <session_id>.cast. Files are playable with 'asciinema play'. Correlate with audit log via session_id. Empty or absent = recording disabled.",
+  "session_recording_dir": "",
+
   "listen": ":8443",
   "server_cert": "pki/broker.crt",
   "server_key": "pki/broker.key",

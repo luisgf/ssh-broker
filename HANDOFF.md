@@ -1,6 +1,6 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
-> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-09 (v1.9.3 — shell AST parsing en CommandPolicy; normalización al inglés de comentarios Go, CHANGELOG.md y strings de usuario).
+> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-09 (v1.10.0 — grabación de sesiones interactivas en ASCIIcast v2 con captura de stdin/stdout/stderr).
 
 ---
 
@@ -719,6 +719,26 @@ Si no se activa `shell_parse`, seguir estas reglas para reducir el riesgo:
 
 ---
 
+### 18. Grabación de sesiones interactivas (v1.10.0)
+
+Las sesiones `shell` y `pty` se graban en ficheros **ASCIIcast v2** (`.cast`) en el directorio configurado por `session_recording_dir`. El formato es el estándar de facto para grabaciones de terminal, reproducible con `asciinema play`.
+
+**Decisiones clave:**
+
+- **Formato ASCIIcast v2**: JSONL estándar con cabecera JSON y eventos `[delta, tipo, data]`. La cabecera incluye el campo privado `ssh_broker` con `session_id`, `caller`, `host`, `serial` y `started_at`, por lo que el fichero es autodesriptivo.
+- **Nombre de fichero `<session_id>.cast`**: único, correlacionable directamente con el audit log por el campo `session_id`. El audit log actúa como índice de búsqueda.
+- **Streams capturados**: stdin (`"i"`), stdout (`"o"`), stderr (`"e"`). En modo PTY stdout y stderr van mezclados en `"o"`.
+- **Solo `shell` y `pty`**: `exec` no se graba (cada `ExecOnce` es aislado; la salida ya va en la respuesta MCP).
+- **Implementación**: `internal/recording/recorder.go` — `Recorder` thread-safe. El `ShellSession` tiene un campo `recorder *recording.Recorder` (nil = sin grabación). `SetRecorder()` propaga el recorder también al `syncBuf` de stderr. El wiring se hace en `broker/session.go:OpenSession`.
+- **Permisos**: `0o600` — igual que los audit logs.
+- **Sin rotación automática**: gestión por directorio a cargo del operador.
+
+```json
+{ "session_recording_dir": "/var/log/ssh-broker/recordings" }
+```
+
+---
+
 ### 13. Hardening de seguridad v1.4.1 (revisión MCP/Snyk)
 
 Doce hallazgos corregidos en orden de criticidad (C → A → M → L):
@@ -827,7 +847,7 @@ El broker (`engine.go`) tiene su propio mecanismo (`auditE()`) que rellena `user
 ### Baja prioridad
 
 - [ ] **Hosts dinámicos (sin declarar en signer.json)**: actualmente todos los hosts deben estar declarados. Se podría añadir un modo `allow_dynamic_hosts: true` en `config.json` donde el modelo suministra `addr/user/host_key/principal` en la llamada. Requiere cambios en el schema MCP, en `engine.go` y en el signer (política inline o wildcard `"*"`).
-- [ ] **Grabación de sesión**: redirigir stdout/stderr de `mode=shell`/`mode=pty` a un grabador antes de devolverlos al broker.
+- [x] **Grabación de sesión** (v1.10.0): `mode=shell` y `mode=pty` grabados en ficheros ASCIIcast v2 (`<session_id>.cast`) en el directorio `session_recording_dir`. Captura stdin, stdout y stderr con timestamps de milisegundo. Ver decisión de diseño #18.
 - [ ] **Dashboard de auditoría**: visualizar los logs de emisión + ejecución correlados por `serial` (incluyendo los campos `elevation` y `pty`).
 - [x] **Whitelist de comandos por host (AI-action firewall)**: implementado en v1.5.0 (Fase A) como `command_policy` (allowlist/denylist + require_approval) en `signer.json` (modo remoto) y en `config.json` (modo local). Autoritativo para one-shot. Complementa la restricción de `sudoers` del host con una segunda capa en el signer. Ver decisión de diseño #14.
 
@@ -943,7 +963,7 @@ Incorporado en `README.md` (sección *Comparison with existing solutions*). Resu
 
 ---
 
-## Estado del plan de pruebas (v1.9.3)
+## Estado del plan de pruebas (v1.10.0)
 
 148 casos totales en 11 paquetes. Todos los tests pasan con `go test -race ./...` (sin data races detectados).
 

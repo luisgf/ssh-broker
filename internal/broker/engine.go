@@ -59,6 +59,11 @@ type Config struct {
 	SessionIdleSeconds int `json:"session_idle_seconds"` // default 300
 	SessionMaxSeconds  int `json:"session_max_seconds"`  // default 1800
 
+	// SessionRecordingDir: directory for session recordings in ASCIIcast v2
+	// format (.cast files). One file per session: <session_id>.cast.
+	// Empty = recording disabled.
+	SessionRecordingDir string `json:"session_recording_dir,omitempty"`
+
 	// Hosts: used only in local mode (single-binary). In remote mode the host
 	// list is fetched from the signer via /v1/hosts and refreshed periodically.
 	Hosts map[string]HostConfig `json:"hosts,omitempty"`

@@ -741,3 +741,109 @@ FAIL: 1234 entries checked, 1 error(s) found
 | `pty` | bool | `true` if PTY was requested |
 | `prev_hash` | string | SHA-256 hex of the previous raw JSON line |
 | `sig` | string | Base64 Ed25519 signature over the entry (with `sig=""`) |
+
+## 8. Session recording
+
+When `session_recording_dir` is set in `config.json`, the broker records
+`shell` and `pty` sessions to **ASCIIcast v2** files (`.cast`). Each file
+captures stdin (what the agent typed), stdout, and stderr with millisecond
+timestamps.
+
+### Enabling recording
+
+```json
+{
+  "session_recording_dir": "/var/log/ssh-broker/recordings"
+}
+```
+
+The directory must exist and be writable by the broker process. File permissions
+are set to `0600` (owner-read only).
+
+### File naming
+
+One file per session: `<session_id>.cast`
+
+```
+/var/log/ssh-broker/recordings/
+  a3f1b2c4d5e6789a.cast
+  b7c8d9e0f1a2b3c4.cast
+```
+
+The `session_id` matches the `session_id` field in the broker's audit log.
+Use the audit log as an index to find recordings by agent, host, or time:
+
+```bash
+# Find all sessions opened by alice on web01 today
+broker-ctl audit show --log audit.log --outcome session_open \
+  --host web01 --caller alice --since 2026-06-09 --json \
+  | jq -r '.session_id'
+
+# List the corresponding recording files
+broker-ctl audit show --log audit.log --outcome session_open --json \
+  | jq -r '.session_id' \
+  | xargs -I{} ls /var/log/ssh-broker/recordings/{}.cast 2>/dev/null
+```
+
+### Recording file format
+
+The file is **ASCIIcast v2** JSONL — one JSON line per event:
+
+```
+{"version":2,"width":220,"height":40,"timestamp":1749470400,
+ "title":"session a3f1b2c4 — alice@web01",
+ "env":{"TERM":"xterm-256color"},
+ "ssh_broker":{"session_id":"a3f1b2c4","caller":"alice","host":"web01",
+               "serial":1042,"started_at":"2026-06-09T14:00:01Z"}}
+[0.000, "i", "df -h /\n"]
+[0.012, "o", "Filesystem      Size  Used Avail Use% Mounted on\n"]
+[0.013, "o", "/dev/sda1        50G   18G   30G  38% /\n"]
+[1.244, "i", "uptime\n"]
+[1.251, "o", " 14:00:02 up 3 days,  2:00\n"]
+```
+
+| Field | Description |
+|---|---|
+| Header line | Session metadata: session_id, caller, host, serial, timestamps |
+| `[delta, "i", data]` | Input (command typed by the agent) |
+| `[delta, "o", data]` | Output (stdout, or merged PTY output) |
+| `[delta, "e", data]` | Stderr (non-PTY sessions only) |
+| `delta` | Seconds since session start (float, millisecond precision) |
+
+The `ssh_broker` extension field in the header is a private extension within the
+ASCIIcast v2 spec (extra fields are allowed). Standard tools ignore it.
+
+### Playback
+
+Any tool that supports ASCIIcast v2 can replay the recording:
+
+```bash
+# Install asciinema if not present
+pip install asciinema   # or: brew install asciinema
+
+# Play a session recording
+asciinema play /var/log/ssh-broker/recordings/a3f1b2c4d5e6789a.cast
+
+# Print the recording as plain text (no timing)
+asciinema cat /var/log/ssh-broker/recordings/a3f1b2c4d5e6789a.cast
+
+# Stream new events as they are written (live tail)
+tail -f /var/log/ssh-broker/recordings/a3f1b2c4d5e6789a.cast \
+  | asciinema cat /dev/stdin
+```
+
+### Scope
+
+Only `shell` and `pty` sessions are recorded. One-shot `ssh_execute` commands
+and `exec`-mode sessions are not recorded (those are fully captured in the audit
+log including stdout/stderr content via `ssh_execute` responses).
+
+### Storage management
+
+Recording files are not rotated automatically. Use standard tools to manage
+retention:
+
+```bash
+# Delete recordings older than 90 days
+find /var/log/ssh-broker/recordings -name "*.cast" -mtime +90 -delete
+```

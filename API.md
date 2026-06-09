@@ -599,6 +599,11 @@ Close a persistent session and release its SSH connection.
 after `session_idle_seconds` or `session_max_seconds` (configured in
 `config.json`), but explicit closure is recommended to free resources promptly.
 
+**Session recording:** when `session_recording_dir` is set in `config.json`,
+`shell` and `pty` sessions are recorded to ASCIIcast v2 files in that directory.
+Each file is named `<session_id>.cast` and contains stdin, stdout, and stderr
+events with millisecond timestamps. See USAGE.md §8 for details.
+
 ---
 
 ## Audit Log Correlation

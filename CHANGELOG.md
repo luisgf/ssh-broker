@@ -1,5 +1,47 @@
 # Changelog
 
+## [v1.10.0] - 2026-06-09
+
+### Added
+- **Session recording in ASCIIcast v2 format.** When `session_recording_dir` is
+  set in `config.json`, `shell` and `pty` sessions are recorded to `.cast` files
+  in that directory. One file per session: `<session_id>.cast`.
+
+  - **`internal/recording/recorder.go`** — new `Recorder` type (thread-safe).
+    Writes ASCIIcast v2 JSONL: a header with session metadata (`session_id`,
+    `caller`, `host`, `serial`, `started_at`) plus event lines
+    `[delta, type, data]` where type is `"i"` (stdin), `"o"` (stdout/PTY),
+    or `"e"` (stderr). Deltas in seconds from session start.
+  - **Stdin captured** (`"i"` events): the command typed by the agent is
+    recorded before being written to the shell's stdin channel.
+  - **Stdout/PTY captured** (`"o"` events): each output line is teed to the
+    recorder inside `ShellSession.Exec()`.
+  - **Stderr captured** (`"e"` events, non-PTY mode only): the `syncBuf` stderr
+    drain tees bytes to the recorder as they arrive.
+  - File naming correlates directly with the broker audit log: the `session_id`
+    field in `session_open`/`session_exec`/`session_close` audit entries matches
+    the `.cast` filename, making the audit log the search index.
+  - Files are written with `0o600` permissions (owner-read only).
+  - `internal/recording/recorder_test.go` — 8 test cases: header fields,
+    event types, delta monotonicity, concurrent writes, empty-data skipping,
+    idempotent close, write-after-close no-op, default dimensions.
+
+- **`session_recording_dir` config field** in `broker.Config`
+  (JSON: `session_recording_dir`). Empty or absent = recording disabled.
+
+### Changed
+- `internal/ssh/shell.go`: `ShellSession` and `syncBuf` gain an optional
+  `recorder *recording.Recorder` field; new `SetRecorder()` method propagates
+  it to both stdout and stderr tee points.
+- `internal/broker/session.go`: `liveSession` gains `recorder` field; recorder
+  is opened in `OpenSession` (when configured), closed in `CloseSession` and the
+  session reaper.
+- `config.example.json`: documents `session_recording_dir`.
+- `USAGE.md`: new §8 "Session recording" with setup, file format, playback, and
+  storage management.
+- `API.md`: session recording note added to the persistent sessions section.
+- `HANDOFF.md`: recording marked as implemented; design decision #18 added.
+
 ## [v1.9.3] - 2026-06-09
 
 ### Changed

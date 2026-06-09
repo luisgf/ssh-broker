@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/luisgf/ssh-broker/internal/recording"
 )
 
 // ShellSession keeps a live shell interpreter over an SSH connection, so that
@@ -36,20 +38,34 @@ type lineRes struct {
 }
 
 type ShellSession struct {
-	mu      sync.Mutex
-	session *ssh.Session
-	stdin   io.WriteCloser
-	lines   chan lineRes // fed by a single reader goroutine
-	stderr  *syncBuf    // nil in PTY mode (merged streams)
-	marker  string
-	pty     bool // true if the session uses a PTY
+	mu       sync.Mutex
+	session  *ssh.Session
+	stdin    io.WriteCloser
+	lines    chan lineRes // fed by a single reader goroutine
+	stderr   *syncBuf    // nil in PTY mode (merged streams)
+	marker   string
+	pty      bool               // true if the session uses a PTY
+	recorder *recording.Recorder // nil = recording disabled
+}
+
+// SetRecorder attaches a Recorder to this session. All subsequent Exec calls
+// will tee stdin, stdout, and stderr (when applicable) to the recorder.
+// Must be called before the first Exec.
+func (s *ShellSession) SetRecorder(r *recording.Recorder) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recorder = r
+	if s.stderr != nil {
+		s.stderr.recorder = r
+	}
 }
 
 // syncBuf is a concurrent buffer: a goroutine drains stderr into it.
 // A3: accumulation is capped at maxOutputBytes to prevent OOM.
 type syncBuf struct {
-	mu  sync.Mutex
-	buf strings.Builder
+	mu       sync.Mutex
+	buf      strings.Builder
+	recorder *recording.Recorder // nil = recording disabled
 }
 
 func (s *syncBuf) Write(p []byte) (int, error) {
@@ -63,7 +79,11 @@ func (s *syncBuf) Write(p []byte) (int, error) {
 	if len(p) > rem {
 		p = p[:rem]
 	}
-	return s.buf.Write(p)
+	n, err := s.buf.Write(p)
+	if n > 0 && s.recorder != nil {
+		_ = s.recorder.WriteStderr(string(p[:n]))
+	}
+	return n, err
 }
 func (s *syncBuf) snapshotLen() int {
 	s.mu.Lock()
@@ -239,6 +259,12 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 		errStart = s.stderr.snapshotLen()
 	}
 
+	// Record stdin before writing to the shell channel. The marker suffix is
+	// internal plumbing; only the user-visible command is recorded.
+	if s.recorder != nil && command != ":" {
+		_ = s.recorder.WriteInput(command + "\n")
+	}
+
 	line := fmt.Sprintf("%s\nprintf '%%s:%%d\\n' '%s' \"$?\"\n", command, s.marker)
 	if _, err := io.WriteString(s.stdin, line); err != nil {
 		return nil, fmt.Errorf("writing command: %w", err)
@@ -269,6 +295,10 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 					return nil, fmt.Errorf("command output exceeds limit of %d bytes", maxOutputBytes)
 				}
 				out.WriteString(lr.text)
+				// Tee stdout line to the recording.
+				if s.recorder != nil {
+					_ = s.recorder.WriteOutput(lr.text)
+				}
 			}
 			if lr.err != nil {
 				return nil, fmt.Errorf("read interrupted: %w", lr.err)
