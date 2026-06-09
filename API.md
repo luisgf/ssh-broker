@@ -239,7 +239,7 @@ mTLS CN) may read it.
 | `403 Forbidden` | Approval denied, or caller is not the request owner. |
 | `408 Request Timeout` | Approval expired (TTL `approval.timeout_seconds`). |
 | `410 Gone` | Approval already consumed (certificate already issued). |
-| `404 Not Found` | Unknown approval id. |
+| `404 Not Found` | Unknown approval id — including requests purged from memory ~2× `approval.timeout_seconds` after creation. |
 
 ---
 
