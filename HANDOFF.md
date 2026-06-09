@@ -1,6 +1,6 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
-> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-08 (v1.9.1 — fases de calidad de código F1–F4: gofmt, writeJSON, t.Parallel, context.Context, refactor funciones largas; CODING_STYLE.md creado).
+> Documento de traspaso para retomar la sesión de desarrollo. Última actualización: 2026-06-09 (v1.9.3 — shell AST parsing en CommandPolicy; normalización de comentarios Go al inglés en todo el código fuente).
 
 ---
 
@@ -645,6 +645,10 @@ Cuatro fases de mejora técnica ejecutadas tras la entrega de v1.8.0. No hay cam
 
 **Documento de estilo creado:** `CODING_STYLE.md` — reglas Go aplicables al proyecto con criterio mecánico de verificación (ver sección "Flujo de trabajo" para el checklist).
 
+#### F5 — v1.9.3: normalización de comentarios al inglés
+
+Todos los comentarios Go, mensajes de error, strings de usuario, flags de CLI y campos `_comment` de JSON de ejemplo traducidos del español al inglés. ~520 líneas de comentarios en 37 archivos `.go`, más `signer.sh` y los `.example.json`. Sin cambio de comportamiento. `CODING_STYLE.md` sección 10 actualizada: inglés obligatorio en todo el código fuente incluyendo legacy (se elimina la excepción "no cambiar en refactors").
+
 ### 17. Seguridad de las reglas `command_policy`: anchoring, metacaracteres shell y `shell_parse`
 
 `CommandPolicy.Decide()` evalúa el comando como **string completa** contra cada regex RE2. Sin parsing de gramática shell previo, `&&`, `;`, `|`, `` ` `` y `$()` son transparentes para el evaluador.
@@ -864,7 +868,7 @@ El broker (`engine.go`) tiene su propio mecanismo (`auditE()`) que rellena `user
 
 Estos archivos son la **documentación viva del proyecto**: un commit sin ellos asume que nada visible cambió (solo refactors internos sin efecto externo). Si el cambio es puramente interno (renombrado de variable, refactoring sin impacto en interfaz), puede omitirse con justificación explícita en el mensaje del commit.
 
-**Language:** all commit messages, new documentation files (`README.md`, `API.md`, guides, etc.) and comments in new code must be written in **English**. Existing internal files (`HANDOFF.md`, `CHANGELOG.md`, comments in existing Go code) may remain in Spanish.
+**Language:** todo el código fuente (comentarios Go, mensajes de error, strings de usuario, flags de CLI, campos `_comment` en JSON de ejemplo, scripts bash) debe estar en **inglés** — incluyendo código legacy. `HANDOFF.md` y `CHANGELOG.md` permanecen en español (documentación operativa). Ver `CODING_STYLE.md` sección 10.
 
 **Coding style:** ver `CODING_STYLE.md` — reglas Go con criterio de verificación mecánico. Checklist rápido antes de cada commit: `gofmt -l .` vacío · `go vet ./...` limpio · `go test -race ./...` verde · ninguna función > 80 líneas · nuevas funciones I/O aceptan `ctx context.Context` · `t.Parallel()` en tests unitarios puros.
 
@@ -939,7 +943,7 @@ Incorporado en `README.md` (sección *Comparison with existing solutions*). Resu
 
 ---
 
-## Estado del plan de pruebas (v1.9.1)
+## Estado del plan de pruebas (v1.9.3)
 
 148 casos totales en 11 paquetes. Todos los tests pasan con `go test -race ./...` (sin data races detectados).
 
