@@ -284,8 +284,8 @@ All source code must be in English. No exceptions for legacy code.
 |---|---|
 | Commit messages | English |
 | Go comments (all files, new and existing) | English |
-| New doc files (`*.md`) | English |
-| `HANDOFF.md` / `CHANGELOG.md` | Spanish (operational docs — do not change) |
+| `*.md` docs (README, API, USAGE, CHANGELOG, ARCHITECTURE, OPERATIONS, THREAT_MODEL, SECURITY, CONTRIBUTING) | English |
+| `HANDOFF.md` | Spanish (internal session-handoff document) |
 
 The rule is: **do not mix languages within a single function or doc block**.
 When editing a legacy function that still has Spanish comments, translate them
@@ -307,5 +307,5 @@ Before opening a PR or pushing to `main`:
 [ ] New Test functions call t.Parallel() (if applicable)
 [ ] Imports in three groups: stdlib / third-party / internal
 [ ] fmt.Errorf uses %w when wrapping an existing error
-[ ] CHANGELOG.md updated (see workflow in HANDOFF.md)
+[ ] CHANGELOG.md updated (see workflow in CONTRIBUTING.md)
 ```

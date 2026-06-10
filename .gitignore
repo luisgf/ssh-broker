@@ -15,7 +15,9 @@ signer.pid
 # Binarios compilados (solo en la raíz del proyecto)
 /ssh-broker
 /mcp-broker
+/mcp-broker-http
 /signer
+/broker
 /broker-ctl
 
 # Directorio de trabajo generado por los scripts de lab (claves SSH efímeras, binarios)
