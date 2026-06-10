@@ -25,6 +25,18 @@ Three frontends share the same engine (`internal/broker`) and tool surface
 - **HTTP+mTLS** — `cmd/broker`, `POST /v1/ssh_run` (one-shot), for network agents
   authenticated with a client certificate.
 
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Diagram, request flow, design decisions, sudo elevation |
+| [THREAT_MODEL.md](THREAT_MODEL.md) | Actors, trust boundaries, and explicit security gaps |
+| [OPERATIONS.md](OPERATIONS.md) | Runbook: startup, adding hosts, hot-reload, `broker-ctl`, PKI |
+| [API.md](API.md) | HTTP endpoint reference for all services |
+| [USAGE.md](USAGE.md) | Guide to the 5 MCP tools (for the model) |
+| [SECURITY.md](SECURITY.md) | Vulnerability disclosure policy |
+| [CONTRIBUTING.md](CONTRIBUTING.md) · [CODING_STYLE.md](CODING_STYLE.md) | Workflow, versioning, Go style |
+
 ## Signing mode: local or external service
 
 The broker obtains certificates through the `internal/signer` interface:

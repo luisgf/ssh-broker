@@ -1,5 +1,34 @@
 # Changelog
 
+## [v1.12.1] - 2026-06-10
+
+### Changed
+- **Documentation split — `HANDOFF.md` broken up by topic/reader.** The 1,100-line
+  HANDOFF (architecture + design decisions + runbook + PKI + pending + versioning
+  + test plan, with the design decisions numbered out of order) is now:
+  - **`ARCHITECTURE.md`** (new, EN) — diagram, request flow, design decisions
+    renumbered and regrouped by theme, sudo elevation mechanism.
+  - **`OPERATIONS.md`** (new, EN) — runbook: startup, adding hosts, hot-reload,
+    `broker-ctl`, PKI inventory, reference configs.
+  - **`CONTRIBUTING.md`** (new, EN) — branches, `X.Y.Z` versioning, the mandatory
+    pre-commit living-docs checklist, language rule.
+  - **`HANDOFF.md`** (reduced to ~145 lines, ES) — current state, file tree,
+    pending work, test-plan snapshot, resume notes, and a documentation index.
+- **`CODING_STYLE.md`** — language table corrected (`CHANGELOG.md` is English
+  since v1.9.3; new `*.md` docs are English; `HANDOFF.md` stays Spanish); the
+  checklist now points to `CONTRIBUTING.md` for the workflow.
+- **`README.md`** — added a Documentation index linking the new files.
+
+### Added
+- **`THREAT_MODEL.md`** (new, EN) — assets, actors/trust levels, trust boundaries
+  and guarantees, and an explicit non-goals/gaps section (sessions without a
+  command firewall, broker-asserted behavior subject, no KRL, no signer rate
+  limit, in-memory single-instance state, default-open `callers`, CA custody).
+- **`SECURITY.md`** (new, EN) — supported versions, private vulnerability
+  reporting, scope (links to the threat model), secret-handling notes.
+
+Documentation only; no code changes.
+
 ## [v1.12.0] - 2026-06-09
 
 ### Added
