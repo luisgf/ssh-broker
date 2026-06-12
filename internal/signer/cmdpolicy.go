@@ -96,10 +96,20 @@ func (cp CommandPolicy) Decide(command string) (allowed bool, needsApproval bool
 			return false, false, "shell-parse:" + err.Error(), err
 		}
 	}
+	// needsApproval se acumula con OR sobre todos los comandos: basta con que
+	// uno requiera aprobación para que la cadena completa la requiera. rule
+	// conserva la primera regla de aprobación que casó (para auditoría); si
+	// ninguno requiere aprobación, la del último comando evaluado.
 	for _, cmd := range cmds {
-		allowed, needsApproval, rule, err = cp.decideOne(cmd)
-		if err != nil || !allowed {
-			return allowed, needsApproval, rule, err
+		cmdAllowed, cmdNeedsApproval, cmdRule, cmdErr := cp.decideOne(cmd)
+		if cmdErr != nil || !cmdAllowed {
+			return cmdAllowed, cmdNeedsApproval, cmdRule, cmdErr
+		}
+		if cmdNeedsApproval && !needsApproval {
+			needsApproval = true
+			rule = cmdRule
+		} else if !needsApproval {
+			rule = cmdRule
 		}
 	}
 	return true, needsApproval, rule, nil

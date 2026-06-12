@@ -103,6 +103,25 @@ func TestResolveErrors(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsUnknownRoleAndPurpose(t *testing.T) {
+	t.Parallel()
+	p := testPolicy()
+	// An unknown role must be rejected, not treated as "neither target nor
+	// bastion" (which would skip command policy and force-command entirely).
+	cases := []Intent{
+		{Caller: "x", Host: "web01", Role: "x", Purpose: PurposeOneshot, Command: "uptime", RequestedTTL: time.Minute},
+		{Caller: "x", Host: "web01", Role: "", Purpose: PurposeOneshot, Command: "uptime", RequestedTTL: time.Minute},
+		{Caller: "x", Host: "web01", Role: "Target", Purpose: PurposeOneshot, Command: "uptime", RequestedTTL: time.Minute},
+		{Caller: "x", Host: "web01", Role: RoleTarget, Purpose: "", Command: "uptime", RequestedTTL: time.Minute},
+		{Caller: "x", Host: "web01", Role: RoleTarget, Purpose: "interactive", Command: "uptime", RequestedTTL: time.Minute},
+	}
+	for _, in := range cases {
+		if _, err := p.Resolve(in, time.Minute); err == nil {
+			t.Errorf("Resolve(role=%q, purpose=%q) must be rejected", in.Role, in.Purpose)
+		}
+	}
+}
+
 // --- Elevation tests (sudo NOPASSWD) ---
 
 func TestResolveSudoOneshotRoot(t *testing.T) {
