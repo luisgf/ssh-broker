@@ -68,18 +68,28 @@ type Config struct {
 	// Behavior: behaviour guardrails (anomaly detection + rate limiting).
 	Behavior control.BehaviorConfig `json:"behavior"`
 
+	// TrustedForwarders: broker client cert CNs whose end_user claim is trusted
+	// (brokers that authenticate end users, e.g. via OIDC). Mirrors the
+	// signer's trusted_forwarders semantics. Behaviour guardrails key on
+	// "<broker CN>:<end_user>" only for these CNs; for any other CN the
+	// client-supplied end_user is ignored and the authenticated broker CN alone
+	// is used, so a client cannot evade rate limits or anomaly detection by
+	// rotating end_user. Empty/absent = end_user never qualifies the subject.
+	TrustedForwarders []string `json:"trusted_forwarders,omitempty"`
+
 	// Audit log for the control plane (independent of broker and signer).
 	AuditLog string `json:"audit_log"`
 	AuditKey string `json:"audit_key"`
 }
 
 type server struct {
-	remote    *signer.Remote
-	registry  *control.Registry
-	notifier  control.Notifier
-	behavior  *control.BehaviorTracker
-	audit     *audit.Log
-	approveCN map[string]struct{}
+	remote     *signer.Remote
+	registry   *control.Registry
+	notifier   control.Notifier
+	behavior   *control.BehaviorTracker
+	audit      *audit.Log
+	approveCN  map[string]struct{}
+	forwarders map[string]struct{} // CNs whose end_user claim is trusted (guardrail subject)
 }
 
 func main() {
@@ -129,12 +139,13 @@ func main() {
 	}
 
 	srv := &server{
-		remote:    remote,
-		registry:  control.NewRegistry(time.Duration(cfg.Approval.TimeoutSeconds) * time.Second),
-		notifier:  notifier,
-		behavior:  control.NewBehaviorTracker(cfg.Behavior),
-		audit:     auditLog,
-		approveCN: cnSet(cfg.Approval.Callers),
+		remote:     remote,
+		registry:   control.NewRegistry(time.Duration(cfg.Approval.TimeoutSeconds) * time.Second),
+		notifier:   notifier,
+		behavior:   control.NewBehaviorTracker(cfg.Behavior),
+		audit:      auditLog,
+		approveCN:  cnSet(cfg.Approval.Callers),
+		forwarders: cnSet(cfg.TrustedForwarders),
 	}
 
 	tlsCfg, err := auth.ServerTLSConfig(cfg.ServerCert, cfg.ServerKey, cfg.ClientCA)
@@ -221,10 +232,7 @@ func (s *server) handleSign(w http.ResponseWriter, r *http.Request) {
 // when the request may proceed, false when a response has already been sent
 // (blocked/escalated).
 func (s *server) checkBehaviorGuardrails(w http.ResponseWriter, r *http.Request, brokerCN string, req signer.WireRequest) bool {
-	subject := req.EndUser
-	if subject == "" {
-		subject = brokerCN
-	}
+	subject := s.guardrailSubject(brokerCN, req.EndUser)
 	anomalies, exceeded := s.behavior.Check(subject, req.Host, req.Command)
 	if !s.behavior.Enforcing() {
 		// Observe mode: audit the anomaly and continue.
@@ -257,6 +265,19 @@ func (s *server) checkBehaviorGuardrails(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	return true
+}
+
+// guardrailSubject returns the subject that keys the behaviour guardrails. It
+// is always derived from the authenticated broker CN: the client-supplied
+// end_user only qualifies the subject ("<broker CN>:<end_user>") when the
+// broker CN is in trusted_forwarders. End_user is an unauthenticated JSON
+// field; keying on it directly would let a client evade rate limits and
+// anomaly detection by rotating it (fresh subjects start a new baseline).
+func (s *server) guardrailSubject(brokerCN, endUser string) string {
+	if _, trusted := s.forwarders[brokerCN]; trusted && endUser != "" {
+		return brokerCN + ":" + endUser
+	}
+	return brokerCN
 }
 
 // forwardSignResult responds to the broker with the result of a signer signing.
@@ -399,6 +420,13 @@ func (s *server) handleApprovalDecide(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	// Self-approval guard: the originator of a request must not decide it,
+	// even when its CN is in the approvers list (four-eyes principle).
+	if pending, ok := s.registry.Get(id); ok && pending.Caller == cn {
+		s.auditE(audit.Entry{Caller: pending.Caller, Host: pending.Host, Command: pending.Command, Outcome: "self-approval-rejected", ApprovalID: pending.ID, ApprovedBy: cn})
+		http.Error(w, "self-approval not allowed: request originator cannot decide it", http.StatusForbidden)
 		return
 	}
 	a, err := s.registry.Decide(id, body.Approve, cn)

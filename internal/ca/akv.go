@@ -12,6 +12,7 @@ import (
 	"encoding/asn1"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"os"
 	"time"
@@ -33,7 +34,7 @@ type akvKeyOps interface {
 type akvSigner struct {
 	ops        akvKeyOps
 	keyName    string
-	keyVersion string // "" = latest
+	keyVersion string // pinned at startup; see newAKVSignerWithOps
 	pubKey     crypto.PublicKey
 }
 
@@ -62,6 +63,20 @@ func newAKVSignerWithOps(ctx context.Context, ops akvKeyOps, keyName, keyVersion
 	pub, err := parseAKVPublicKey(resp.Key)
 	if err != nil {
 		return nil, fmt.Errorf("AKV key %q: %w", keyName, err)
+	}
+	// Pin the key version at startup. With an empty keyVersion, GetKey resolves
+	// the latest version, but signing with "" would resolve "latest" again on
+	// every call: after a Key Vault rotation, Sign would silently switch to the
+	// new version while pubKey (and the cert's SignatureKey) still hold the old
+	// one, so sshd would reject every cert. Extract the resolved version from
+	// the returned KID (last path segment of the key URL) so every Sign call
+	// uses exactly the version the public key was fetched from. Picking up a
+	// rotated key requires a signer reload/restart (consistent with docs).
+	if keyVersion == "" && resp.Key.KID != nil {
+		keyVersion = resp.Key.KID.Version()
+		if keyVersion != "" {
+			log.Printf("AKV key %q: pinned to version %s (key rotation requires a signer reload/restart)", keyName, keyVersion)
+		}
 	}
 	return &akvSigner{ops: ops, keyName: keyName, keyVersion: keyVersion, pubKey: pub}, nil
 }

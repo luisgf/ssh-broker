@@ -41,11 +41,19 @@ type ShellSession struct {
 	mu       sync.Mutex
 	session  *ssh.Session
 	stdin    io.WriteCloser
-	lines    chan lineRes // fed by a single reader goroutine
-	stderr   *syncBuf     // nil in PTY mode (merged streams)
+	lines    chan lineRes  // fed by a single reader goroutine
+	done     chan struct{} // closed on Close; releases the reader goroutine
+	stderr   *syncBuf      // nil in PTY mode (merged streams)
 	marker   string
 	pty      bool                // true if the session uses a PTY
 	recorder *recording.Recorder // nil = recording disabled
+
+	closeOnce sync.Once
+	// broken is set when the marker protocol desynchronises (e.g. an Exec
+	// timeout left the command's output and marker in flight). Once broken,
+	// every Exec fails: reading the channel again would attribute the
+	// previous command's output to the next one.
+	broken bool
 }
 
 // SetRecorder attaches a Recorder to this session. All subsequent Exec calls
@@ -71,19 +79,23 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// A3: silently discard bytes that exceed the limit.
-	if s.buf.Len() >= maxOutputBytes {
+	// A3: silently discard bytes that exceed the limit. The full slice is
+	// always reported as consumed: returning n < len(p) with a nil error
+	// would make the io.Copy draining stderr die with ErrShortWrite and
+	// lose all stderr from that point on.
+	rem := maxOutputBytes - s.buf.Len()
+	if rem <= 0 {
 		return len(p), nil
 	}
-	rem := maxOutputBytes - s.buf.Len()
-	if len(p) > rem {
-		p = p[:rem]
+	keep := p
+	if len(keep) > rem {
+		keep = keep[:rem]
 	}
-	n, err := s.buf.Write(p)
+	n, _ := s.buf.Write(keep) // strings.Builder.Write never returns an error
 	if n > 0 && s.recorder != nil {
-		_ = s.recorder.WriteStderr(string(p[:n]))
+		_ = s.recorder.WriteStderr(string(keep[:n]))
 	}
-	return n, err
+	return len(p), nil
 }
 func (s *syncBuf) snapshotLen() int {
 	s.mu.Lock()
@@ -137,15 +149,18 @@ func OpenShell(client *ssh.Client, shellCmd string) (*ShellSession, error) {
 		session: session,
 		stdin:   stdin,
 		lines:   make(chan lineRes),
+		done:    make(chan struct{}),
 		stderr:  &syncBuf{},
 		marker:  "__BRK_" + hex.EncodeToString(b[:]) + "__",
 		pty:     false,
 	}
 	go func() { _, _ = io.Copy(sh.stderr, stderrPipe) }()
-	go shellReader(stdout, sh.lines)
+	go shellReader(stdout, sh.lines, sh.done)
 
 	if _, err := sh.Exec(":", 10*time.Second); err != nil {
-		session.Close()
+		// sh.Close (not session.Close) so the done channel releases the
+		// reader goroutine.
+		_ = sh.Close()
 		return nil, fmt.Errorf("synchronising shell: %w", err)
 	}
 	return sh, nil
@@ -166,24 +181,8 @@ func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*Shell
 		return nil, fmt.Errorf("opening PTY session: %w", err)
 	}
 
-	term := opts.Term
-	if term == "" {
-		term = defaultPTYTerm
-	}
-	rows := opts.Rows
-	if rows == 0 {
-		rows = 40
-	}
-	cols := opts.Cols
-	if cols == 0 {
-		cols = 220
-	}
-	modes := ssh.TerminalModes{
-		ssh.ECHO:          0, // disable echo
-		ssh.TTY_OP_ISPEED: 14400,
-		ssh.TTY_OP_OSPEED: 14400,
-	}
-	if err := session.RequestPty(term, int(rows), int(cols), modes); err != nil {
+	term, rows, cols, modes := ptyParams(opts)
+	if err := session.RequestPty(term, rows, cols, modes); err != nil {
 		session.Close()
 		return nil, fmt.Errorf("requesting PTY: %w", err)
 	}
@@ -211,22 +210,25 @@ func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*Shell
 		session: session,
 		stdin:   stdin,
 		lines:   make(chan lineRes),
+		done:    make(chan struct{}),
 		stderr:  nil, // merged into stdout with PTY
 		marker:  "__BRK_" + hex.EncodeToString(b[:]) + "__",
 		pty:     true,
 	}
-	go shellReader(stdout, sh.lines)
+	go shellReader(stdout, sh.lines, sh.done)
 
 	// Silence the prompt and ensure echo is off.
 	initCmd := "stty -echo 2>/dev/null; PS1=''; PS2=''\n"
 	if _, err := io.WriteString(stdin, initCmd); err != nil {
-		session.Close()
+		// sh.Close (not session.Close) so the done channel releases the
+		// reader goroutine.
+		_ = sh.Close()
 		return nil, fmt.Errorf("initialising PTY: %w", err)
 	}
 
 	// Synchronise with a no-op to consume the init output.
 	if _, err := sh.Exec(":", 10*time.Second); err != nil {
-		session.Close()
+		_ = sh.Close()
 		return nil, fmt.Errorf("synchronising PTY shell: %w", err)
 	}
 	return sh, nil
@@ -234,12 +236,18 @@ func OpenShellPTY(client *ssh.Client, shellCmd string, opts ExecOptions) (*Shell
 
 // shellReader is the single reader goroutine: reads lines from stdout and
 // delivers them in order. Between commands it blocks on ReadString (no output
-// to lose).
-func shellReader(r io.Reader, out chan<- lineRes) {
+// to lose). It exits when the reader returns an error (EOF on close) or when
+// done is closed — without done, a send with no receiver (session closed
+// while output was in flight) would leak the goroutine forever.
+func shellReader(r io.Reader, out chan<- lineRes, done <-chan struct{}) {
 	br := bufio.NewReader(r)
 	for {
 		t, err := br.ReadString('\n')
-		out <- lineRes{t, err}
+		select {
+		case out <- lineRes{t, err}:
+		case <-done:
+			return
+		}
 		if err != nil {
 			return
 		}
@@ -253,6 +261,10 @@ func shellReader(r io.Reader, out chan<- lineRes) {
 func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.broken {
+		return nil, fmt.Errorf("shell session is desynchronised after a previous timeout or overflow; close this session and open a new one")
+	}
 
 	var errStart int
 	if s.stderr != nil {
@@ -275,7 +287,12 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 	for {
 		select {
 		case <-deadline:
-			return nil, fmt.Errorf("timeout waiting for command output")
+			// The timed-out command's output and end marker are still in
+			// flight; any further Exec would read them and misattribute the
+			// previous command's output (and exit code) to the next command.
+			// Mark the session permanently broken.
+			s.broken = true
+			return nil, fmt.Errorf("timeout waiting for command output; the session is desynchronised: close it and open a new one")
 		case lr := <-s.lines:
 			if idx := strings.Index(lr.text, s.marker+":"); idx >= 0 {
 				code, _ := strconv.Atoi(strings.TrimSpace(lr.text[idx+len(s.marker)+1:]))
@@ -290,9 +307,12 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 				}, nil
 			}
 			if lr.text != "" {
-				// A3: limit stdout accumulation to prevent OOM.
+				// A3: limit stdout accumulation to prevent OOM. Returning
+				// mid-command leaves the rest of the output and the marker
+				// in flight, so the session is desynchronised too.
 				if out.Len()+len(lr.text) > maxOutputBytes {
-					return nil, fmt.Errorf("command output exceeds limit of %d bytes", maxOutputBytes)
+					s.broken = true
+					return nil, fmt.Errorf("command output exceeds limit of %d bytes; the session is desynchronised: close it and open a new one", maxOutputBytes)
 				}
 				out.WriteString(lr.text)
 				// Tee stdout line to the recording.
@@ -307,10 +327,12 @@ func (s *ShellSession) Exec(command string, timeout time.Duration) (*Result, err
 	}
 }
 
-// Close closes the shell.
+// Close closes the shell and releases the reader goroutine. Safe to call
+// more than once.
 func (s *ShellSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closeOnce.Do(func() { close(s.done) })
 	_ = s.stdin.Close()
 	return s.session.Close()
 }

@@ -51,8 +51,10 @@ func (t *BehaviorTracker) Enabled() bool {
 // only auditing).
 func (t *BehaviorTracker) Enforcing() bool { return t.cfg.Mode == BehaviorEnforce }
 
-// Check records a request from the subject (broker or end user) and returns
-// detected anomalies and whether the rate limit has been exceeded. The first
+// Check records a request from the subject (the authenticated broker CN,
+// optionally qualified with a trusted end user — see the control plane's
+// guardrailSubject) and returns detected anomalies and whether the rate limit
+// has been exceeded. The first
 // request from a subject establishes the baseline: new-host/new-command are
 // not flagged (only on subsequent requests with novel host/command).
 func (t *BehaviorTracker) Check(subject, host, command string) (anomalies []string, exceeded bool) {

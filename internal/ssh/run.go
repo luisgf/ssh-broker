@@ -5,6 +5,7 @@ package ssh
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"fmt"
 	"io"
@@ -24,26 +25,42 @@ const (
 	maxOutputBytes = 10 * 1024 * 1024 // 10 MiB
 )
 
-// limitedWriter writes to an internal bytes.Buffer up to max bytes. When the
-// limit is exceeded, further writes return an error so the SSH channel stops
-// accumulating data.
+// limitedWriter accumulates up to max bytes in an internal bytes.Buffer and
+// silently discards the overflow, recording that the output was truncated.
+// It always reports the full slice as consumed: returning n < len(p) with a
+// nil error would violate the io.Writer contract and make the io.Copy inside
+// x/crypto/ssh abort with ErrShortWrite (failing the command or stalling the
+// channel) instead of delivering truncated output.
 type limitedWriter struct {
-	buf   bytes.Buffer
-	max   int
-	total int
+	buf       bytes.Buffer
+	max       int
+	truncated bool
 }
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
-	if lw.total >= lw.max {
-		return 0, fmt.Errorf("output truncated: limit of %d bytes exceeded", lw.max)
+	rem := lw.max - lw.buf.Len()
+	if rem <= 0 {
+		if len(p) > 0 {
+			lw.truncated = true
+		}
+		return len(p), nil
 	}
-	rem := lw.max - lw.total
-	if len(p) > rem {
-		p = p[:rem]
+	keep := p
+	if len(keep) > rem {
+		keep = keep[:rem]
+		lw.truncated = true
 	}
-	n, err := lw.buf.Write(p)
-	lw.total += n
-	return n, err
+	lw.buf.Write(keep) // bytes.Buffer.Write never returns an error
+	return len(p), nil
+}
+
+// output returns the captured stream, with an explicit marker appended when
+// the output was truncated at the cap.
+func (lw *limitedWriter) output() string {
+	if !lw.truncated {
+		return lw.buf.String()
+	}
+	return lw.buf.String() + fmt.Sprintf("\n[output truncated: limit of %d bytes exceeded]\n", lw.max)
 }
 
 // Hop is one step in the connection chain (bastion or final target). The first
@@ -116,8 +133,10 @@ func hopClientConfig(h Hop, timeout time.Duration) (*ssh.ClientConfig, error) {
 }
 
 // Dial establishes the connection chain. hops[0] is the first hop (or the
-// target if there is no bastion); the last hop is the final target.
-func Dial(hops []Hop, timeout time.Duration) (*Conn, error) {
+// target if there is no bastion); the last hop is the final target. ctx bounds
+// every dial in the chain (TCP to the first hop and the direct-tcpip channel
+// opens through the bastions), in addition to the per-hop timeout.
+func Dial(ctx context.Context, hops []Hop, timeout time.Duration) (*Conn, error) {
 	if len(hops) == 0 {
 		return nil, fmt.Errorf("at least one hop is required")
 	}
@@ -129,7 +148,8 @@ func Dial(hops []Hop, timeout time.Duration) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	tcp, err := net.DialTimeout("tcp", hops[0].Addr, timeout)
+	dialer := net.Dialer{Timeout: timeout}
+	tcp, err := dialer.DialContext(ctx, "tcp", hops[0].Addr)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", hops[0].Addr, err)
 	}
@@ -147,8 +167,12 @@ func Dial(hops []Hop, timeout time.Duration) (*Conn, error) {
 			conn.closeAll()
 			return nil, err
 		}
-		// direct-tcpip channel through the previous hop.
-		nc, err := current.Dial("tcp", hops[i].Addr)
+		// direct-tcpip channel through the previous hop. ClientConfig.Timeout
+		// only covers the SSH handshake, so the channel open needs its own
+		// bound or a dead bastion would block the dial indefinitely.
+		dialCtx, cancel := context.WithTimeout(ctx, timeout)
+		nc, err := current.DialContext(dialCtx, "tcp", hops[i].Addr)
+		cancel()
 		if err != nil {
 			conn.closeAll()
 			return nil, fmt.Errorf("hop to %s: %w", hops[i].Addr, err)
@@ -193,6 +217,29 @@ type ExecOptions struct {
 // defaultPTYTerm is the default terminal type.
 const defaultPTYTerm = "xterm-256color"
 
+// ptyParams resolves the terminal type, dimensions, and modes for a PTY
+// request, applying the defaults (xterm-256color, 40×220, echo off).
+func ptyParams(o ExecOptions) (string, int, int, ssh.TerminalModes) {
+	term := o.Term
+	if term == "" {
+		term = defaultPTYTerm
+	}
+	rows := o.Rows
+	if rows == 0 {
+		rows = 40
+	}
+	cols := o.Cols
+	if cols == 0 {
+		cols = 220
+	}
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          0, // disable echo
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	return term, int(rows), int(cols), modes
+}
+
 // ExecOnce opens an exec channel over conn, runs command, and captures the
 // output. If opts.PTY is true a PTY is requested first; streams are merged.
 // A3: execution is bounded by opts.Timeout (or defaultExecTimeout when 0) and
@@ -216,24 +263,8 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 	res := &Result{}
 
 	if o.PTY {
-		term := o.Term
-		if term == "" {
-			term = defaultPTYTerm
-		}
-		rows := o.Rows
-		if rows == 0 {
-			rows = 40
-		}
-		cols := o.Cols
-		if cols == 0 {
-			cols = 220
-		}
-		modes := ssh.TerminalModes{
-			ssh.ECHO:          0, // no echo
-			ssh.TTY_OP_ISPEED: 14400,
-			ssh.TTY_OP_OSPEED: 14400,
-		}
-		if err := session.RequestPty(term, int(rows), int(cols), modes); err != nil {
+		term, rows, cols, modes := ptyParams(o)
+		if err := session.RequestPty(term, rows, cols, modes); err != nil {
 			return nil, fmt.Errorf("requesting PTY: %w", err)
 		}
 		// With PTY, stdout and stderr are merged in the PTY stdout channel.
@@ -248,7 +279,7 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 
 		select {
 		case r := <-done:
-			res.Stdout = combined.buf.String()
+			res.Stdout = combined.output()
 			if r.err != nil {
 				if exitErr, ok := r.err.(*ssh.ExitError); ok {
 					res.ExitCode = exitErr.ExitStatus()
@@ -276,8 +307,8 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 
 	select {
 	case r := <-done:
-		res.Stdout = stdout.buf.String()
-		res.Stderr = stderr.buf.String()
+		res.Stdout = stdout.output()
+		res.Stderr = stderr.output()
 		if r.err != nil {
 			if exitErr, ok := r.err.(*ssh.ExitError); ok {
 				res.ExitCode = exitErr.ExitStatus()
@@ -293,8 +324,8 @@ func ExecOnce(client *ssh.Client, command string, opts ...ExecOptions) (*Result,
 }
 
 // Run connects in a single shot (one hop, the target) and executes command.
-func Run(priv ed25519.PrivateKey, cert *ssh.Certificate, t Target, command string) (*Result, error) {
-	conn, err := Dial([]Hop{{
+func Run(ctx context.Context, priv ed25519.PrivateKey, cert *ssh.Certificate, t Target, command string) (*Result, error) {
+	conn, err := Dial(ctx, []Hop{{
 		Addr: t.Addr, User: t.User, HostKey: t.HostKey,
 		PrivateKey: priv, Certificate: cert,
 	}}, t.ConnectTimeout)

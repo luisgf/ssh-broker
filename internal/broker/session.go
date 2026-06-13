@@ -40,6 +40,11 @@ type liveSession struct {
 	shell    *sshrun.ShellSession // only in "shell" and "pty" mode
 	created  time.Time
 	lastUsed time.Time
+	// busy counts commands in flight on this session (protected by the
+	// manager's mutex). The reaper never closes a busy session: the exec
+	// timeout can exceed the idle TTL, and closing the connection under a
+	// running command would break it mid-flight.
+	busy int
 
 	// Elevation: prefix to prepend to each command in exec sessions.
 	// In shell/pty sessions the elevation is already in the shell process.
@@ -94,17 +99,36 @@ func (m *sessionManager) reaper() {
 		case <-m.stop:
 			return
 		case now := <-t.C:
-			m.mu.Lock()
-			for id, s := range m.sessions {
-				if now.Sub(s.lastUsed) > m.idleTTL || now.Sub(s.created) > m.maxLife {
-					s.close()
-					delete(m.sessions, id)
-					if m.onReap != nil {
-						m.onReap(s)
-					}
-				}
-			}
-			m.mu.Unlock()
+			m.reapExpired(now)
+		}
+	}
+}
+
+// reapExpired closes and removes the sessions that exceeded the idle TTL or
+// the maximum lifetime. Victims are collected and deleted from the map under
+// the lock, then closed and audited outside it: close() does network I/O
+// (and can block on the shell mutex) and onReap writes to disk, neither of
+// which may stall other session operations.
+func (m *sessionManager) reapExpired(now time.Time) {
+	m.mu.Lock()
+	var victims []*liveSession
+	for id, s := range m.sessions {
+		// Never reap a session with a command in flight. A busy session
+		// past maxLife is reaped on the first tick after it goes idle.
+		if s.busy > 0 {
+			continue
+		}
+		if now.Sub(s.lastUsed) > m.idleTTL || now.Sub(s.created) > m.maxLife {
+			delete(m.sessions, id)
+			victims = append(victims, s)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, s := range victims {
+		s.close()
+		if m.onReap != nil {
+			m.onReap(s)
 		}
 	}
 }
@@ -140,6 +164,31 @@ func (m *sessionManager) get(id string) (*liveSession, bool) {
 		s.lastUsed = time.Now()
 	}
 	return s, ok
+}
+
+// checkout returns the session and marks one command as in flight, so the
+// reaper will not close the connection while the command runs. Every
+// successful checkout must be paired with a checkin when the command ends.
+func (m *sessionManager) checkout(id string) (*liveSession, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if ok {
+		s.lastUsed = time.Now()
+		s.busy++
+	}
+	return s, ok
+}
+
+// checkin marks the end of an in-flight command and refreshes lastUsed, so
+// the idle TTL counts from command completion rather than from its start.
+func (m *sessionManager) checkin(s *liveSession) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s.busy > 0 {
+		s.busy--
+	}
+	s.lastUsed = time.Now()
 }
 
 func (m *sessionManager) remove(id string) (*liveSession, bool) {
@@ -200,7 +249,7 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Outcome: "error", Err: err.Error()})
 		return nil, err
 	}
-	conn, err := sshrun.Dial(hops, 0)
+	conn, err := sshrun.Dial(ctx, hops, 0)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Serial: serial, Outcome: "error", Err: err.Error()})
 		return nil, fmt.Errorf("connection: %w", err)
@@ -289,10 +338,13 @@ func (e *Engine) OpenSession(ctx context.Context, c Caller, host, mode string, t
 // SessionExec executes command in an existing session, reusing the connection.
 // In exec sessions with elevation, the signer-authorised prefix is prepended.
 func (e *Engine) SessionExec(_ context.Context, c Caller, sessionID, command string) (*Result, error) {
-	s, ok := e.sessions.get(sessionID)
+	s, ok := e.sessions.checkout(sessionID)
 	if !ok {
 		return nil, fmt.Errorf("unknown or expired session: %q", sessionID)
 	}
+	// Mark the session idle again (and refresh lastUsed) when the command
+	// finishes, so the reaper never closes a connection mid-command.
+	defer e.sessions.checkin(s)
 	// C1: verify that the caller owns the session.
 	if s.caller != c.ID {
 		return nil, fmt.Errorf("session %q does not belong to the current caller", sessionID)

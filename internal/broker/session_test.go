@@ -162,20 +162,8 @@ func TestSessionManagerReaperIdleTTL(t *testing.T) {
 	s.lastUsed = time.Now().Add(-1 * time.Hour)
 	_ = m.add(s)
 
-	// Disparar el reaper manualmente accediendo al estado interno bajo el lock.
-	// Esto evita tener que esperar el tick de 30 s de producción.
-	m.mu.Lock()
-	now := time.Now()
-	for id, sess := range m.sessions {
-		if now.Sub(sess.lastUsed) > m.idleTTL {
-			sess.close()
-			delete(m.sessions, id)
-			if m.onReap != nil {
-				m.onReap(sess)
-			}
-		}
-	}
-	m.mu.Unlock()
+	// Disparar el reaper manualmente sin esperar el tick de 30 s de producción.
+	m.reapExpired(time.Now())
 
 	select {
 	case id := <-reaped:
@@ -188,6 +176,91 @@ func TestSessionManagerReaperIdleTTL(t *testing.T) {
 
 	if _, ok := m.get("stale"); ok {
 		t.Error("la sesión stale no debería existir tras el reaper")
+	}
+}
+
+// TestSessionManagerReaperNoMataSesionesOcupadas verifica que el reaper nunca
+// cierra una sesión con un comando en vuelo (busy), ni por idle TTL ni por
+// maxLife, aunque ambos estén vencidos. La sesión se recolecta en el primer
+// tick después de quedar libre (checkin).
+func TestSessionManagerReaperNoMataSesionesOcupadas(t *testing.T) {
+	reaped := make(chan string, 1)
+	m := newSessionManager(5*time.Minute, 30*time.Minute, func(s *liveSession) { reaped <- s.id })
+	t.Cleanup(func() { m.closeAll() })
+
+	s := dummySession("busy", "alice")
+	_ = m.add(s)
+
+	// Marcar la sesión como ocupada (comando en vuelo).
+	got, ok := m.checkout("busy")
+	if !ok || got != s {
+		t.Fatalf("checkout: ok=%v", ok)
+	}
+
+	// Forzar el vencimiento de idle TTL y maxLife.
+	m.mu.Lock()
+	s.lastUsed = time.Now().Add(-2 * time.Hour)
+	s.created = time.Now().Add(-2 * time.Hour)
+	m.mu.Unlock()
+
+	m.reapExpired(time.Now())
+	if _, ok := m.get("busy"); !ok {
+		t.Fatal("el reaper no debe cerrar una sesión con un comando en vuelo")
+	}
+	select {
+	case id := <-reaped:
+		t.Fatalf("onReap no debe dispararse para una sesión busy (id=%q)", id)
+	default:
+	}
+
+	// Al terminar el comando (checkin) la sesión sigue dentro de maxLife
+	// vencido, así que el siguiente tick la recolecta.
+	m.checkin(s)
+	m.mu.Lock()
+	s.created = time.Now().Add(-2 * time.Hour) // checkin refresca lastUsed, no created
+	m.mu.Unlock()
+
+	m.reapExpired(time.Now())
+	if _, ok := m.get("busy"); ok {
+		t.Error("la sesión libre con maxLife vencido debe recolectarse en el primer tick")
+	}
+	select {
+	case id := <-reaped:
+		if id != "busy" {
+			t.Errorf("onReap reportó %q, quiero \"busy\"", id)
+		}
+	default:
+		t.Error("onReap debería haberse disparado tras el checkin")
+	}
+}
+
+// TestSessionManagerCheckinActualizaLastUsed verifica que lastUsed se refresca
+// al TERMINAR el comando, no solo al empezar: el idle TTL cuenta desde que la
+// sesión queda libre.
+func TestSessionManagerCheckinActualizaLastUsed(t *testing.T) {
+	m := newTestSessionManager(t)
+	s := dummySession("s-checkin", "alice")
+	_ = m.add(s)
+
+	got, ok := m.checkout("s-checkin")
+	if !ok {
+		t.Fatal("checkout debe encontrar la sesión")
+	}
+	m.mu.Lock()
+	got.lastUsed = time.Now().Add(-10 * time.Minute) // simular comando largo
+	m.mu.Unlock()
+
+	before := time.Now()
+	m.checkin(got)
+
+	m.mu.Lock()
+	last, busy := got.lastUsed, got.busy
+	m.mu.Unlock()
+	if last.Before(before) {
+		t.Error("checkin debe actualizar lastUsed al terminar el comando")
+	}
+	if busy != 0 {
+		t.Errorf("busy tras checkin = %d, quiero 0", busy)
 	}
 }
 

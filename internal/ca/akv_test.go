@@ -292,6 +292,84 @@ func TestAKVAlgorithmRSA(t *testing.T) {
 	}
 }
 
+// TestAKVSignerPinsVersionFromKID is a regression test: with an empty
+// key_version, GetKey resolves the latest version at startup but Sign used to
+// pass "" (= latest at call time), so after a Key Vault rotation every cert
+// was signed by the new version while SignatureKey held the old public key.
+// The version must be pinned from the KID returned by GetKey.
+func TestAKVSignerPinsVersionFromKID(t *testing.T) {
+	t.Parallel()
+	mock, _ := ecP256Mock(t)
+
+	kid := azkeys.ID("https://v.vault.azure.net/keys/my-key/abc123def456")
+	origGet := mock.getKeyFn
+	mock.getKeyFn = func(ctx context.Context, name, version string, opts *azkeys.GetKeyOptions) (azkeys.GetKeyResponse, error) {
+		resp, err := origGet(ctx, name, version, opts)
+		resp.Key.KID = &kid
+		return resp, err
+	}
+	var signVersion string
+	origSign := mock.signFn
+	mock.signFn = func(ctx context.Context, name, version string, params azkeys.SignParameters, opts *azkeys.SignOptions) (azkeys.SignResponse, error) {
+		signVersion = version
+		return origSign(ctx, name, version, params, opts)
+	}
+
+	s, err := newAKVSignerWithOps(context.Background(), mock, "my-key", "")
+	if err != nil {
+		t.Fatalf("newAKVSignerWithOps: %v", err)
+	}
+	if s.keyVersion != "abc123def456" {
+		t.Fatalf("keyVersion = %q, want abc123def456 (pinned from KID)", s.keyVersion)
+	}
+
+	digest := make([]byte, 32) // pre-computed SHA-256 digest (content irrelevant)
+	if _, err := s.Sign(rand.Reader, digest, crypto.SHA256); err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if signVersion != "abc123def456" {
+		t.Errorf("Sign called with version %q, want abc123def456 (pinned)", signVersion)
+	}
+}
+
+// TestAKVSignerExplicitVersionKept verifies that an explicitly configured
+// key_version is not overridden by the KID returned by GetKey.
+func TestAKVSignerExplicitVersionKept(t *testing.T) {
+	t.Parallel()
+	mock, _ := ecP256Mock(t)
+
+	kid := azkeys.ID("https://v.vault.azure.net/keys/my-key/other-version")
+	origGet := mock.getKeyFn
+	mock.getKeyFn = func(ctx context.Context, name, version string, opts *azkeys.GetKeyOptions) (azkeys.GetKeyResponse, error) {
+		resp, err := origGet(ctx, name, version, opts)
+		resp.Key.KID = &kid
+		return resp, err
+	}
+
+	s, err := newAKVSignerWithOps(context.Background(), mock, "my-key", "pinned-v1")
+	if err != nil {
+		t.Fatalf("newAKVSignerWithOps: %v", err)
+	}
+	if s.keyVersion != "pinned-v1" {
+		t.Errorf("keyVersion = %q, want pinned-v1 (explicit version must be kept)", s.keyVersion)
+	}
+}
+
+// TestAKVSignerNilKIDKeepsEmptyVersion verifies that a response without KID
+// (defensive case) does not crash and leaves the version empty.
+func TestAKVSignerNilKIDKeepsEmptyVersion(t *testing.T) {
+	t.Parallel()
+	mock, _ := ecP256Mock(t) // ecP256Mock returns no KID
+
+	s, err := newAKVSignerWithOps(context.Background(), mock, "my-key", "")
+	if err != nil {
+		t.Fatalf("newAKVSignerWithOps: %v", err)
+	}
+	if s.keyVersion != "" {
+		t.Errorf("keyVersion = %q, want empty when KID is absent", s.keyVersion)
+	}
+}
+
 // TestAKVSignerSignedByCACert verifies that a cert signed by the AKV-backed CA
 // validates against the CA's public key (end-to-end with BuildAndSign).
 func TestAKVSignerSignedByCACert(t *testing.T) {

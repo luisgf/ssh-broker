@@ -91,10 +91,15 @@ without it. A compromised broker or control plane cannot forge certificates.
 ### Approval & audit
 - **Approval gate is authoritative and unavoidable:** the signer issues no cert
   for a `require_approval` command unless `approved` arrives from a trusted
-  forwarder. A direct broker cannot self-approve. Each approval is consumed once.
+  forwarder. A direct broker cannot self-approve, and the originator of a
+  request cannot decide its own approval (four-eyes, even if its CN is an
+  approver). Each approval is consumed once.
 - **Audit log** is append-only, SHA-256 hash-chained, and Ed25519-signed per
   entry; any deletion/reordering/modification is detectable by replaying the
-  chain. Three logs (signer, broker, sshd) correlate by cert `serial`.
+  chain. The chain stays continuous **across log rotation** — each rotated-to
+  file's first entry links to the previous file's last hash — so dropping a
+  whole rotated segment is also detectable. Three logs (signer, broker, sshd)
+  correlate by cert `serial`.
 
 ---
 
@@ -134,11 +139,16 @@ sudoers/principal allow.
   isolated channel). Not possible for `shell`/`pty` (stateful).
 
 ### 2. Behavior guardrails are detection, not containment
-The `BehaviorTracker` subject is the `end_user` **asserted by the broker**. A
-compromised broker — exactly the actor this architecture hardens against — can
-rotate identities to reset baselines and rate limits. Behavior anomalies are
-therefore advisory; the authoritative controls are the signer-side policy and
-approval gate, which a broker cannot bypass.
+The guardrail subject is the **authenticated broker CN** (the mTLS client
+certificate). The client-supplied `end_user` only qualifies the subject
+(`<broker CN>:<end_user>`) when the broker CN is listed in the control plane's
+`trusted_forwarders` — i.e. a broker the operator trusts to authenticate end
+users (e.g. via OIDC). For any other CN the unauthenticated `end_user` is
+ignored, so a client **cannot** reset baselines or rate limits by rotating it
+(fixed in v1.12.6). The residual gap is narrower: a *trusted* forwarder that is
+itself compromised can still rotate the `end_user` half of its own subject.
+Behavior anomalies remain advisory regardless; the authoritative controls are
+the signer-side policy and approval gate, which a broker cannot bypass.
 
 ### 3. No certificate revocation (KRL)
 Mitigation is the short TTL (minutes). A certificate leaked within its validity

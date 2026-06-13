@@ -466,7 +466,7 @@ func (e *Engine) Execute(ctx context.Context, c Caller, host, command string, tt
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Outcome: "error", Err: err.Error()})
 		return nil, err
 	}
-	conn, err := sshrun.Dial(hops, 0)
+	conn, err := sshrun.Dial(ctx, hops, 0)
 	if err != nil {
 		e.auditE(audit.Entry{Caller: c.ID, Host: host, Command: command, Serial: serial, Outcome: "error", Err: err.Error()})
 		return nil, fmt.Errorf("connection: %w", err)

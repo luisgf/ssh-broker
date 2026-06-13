@@ -1,9 +1,12 @@
 # Handoff: SSH Broker con CA Efímera para Agentes de IA
 
 > Documento de traspaso para retomar la sesión de desarrollo. Última
-> actualización: 2026-06-13 (v1.12.5 — revisión de fallos de lógica: cerrados
-> dos bypasses del firewall de comandos del signer; el resto de hallazgos
-> críticos/medios van en v1.12.6).
+> actualización: 2026-06-13 (v1.12.6 — segunda tanda de la revisión de fallos
+> de lógica: reaper de sesiones, desync de marcadores en shells, continuidad
+> del audit chain en rotación, `audit verify`/`ca-keys`/`--force`/`--scan` de
+> broker-ctl, pinning de versión AKV, subject de guardrails autenticado
+> (`trusted_forwarders`), no auto-aprobación. v1.12.5 cerró dos bypasses del
+> firewall de comandos del signer).
 > Estado y pendientes; el resto de la documentación está enlazada abajo.
 
 ## Índice de documentación
