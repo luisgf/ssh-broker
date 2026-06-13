@@ -304,6 +304,51 @@ func TestCommandPolicyShellParse(t *testing.T) {
 	}
 }
 
+func TestCommandPolicyShellParseApprovalAccumulates(t *testing.T) {
+	t.Parallel()
+	cp := CommandPolicy{
+		Mode:            CmdPolicyAllowlist,
+		Allow:           []string{`^systemctl `},
+		RequireApproval: []string{`^systemctl restart `},
+		ShellParse:      true,
+	}
+
+	// El comando que requiere aprobación va primero: el segundo comando de la
+	// cadena no debe "limpiar" el flag (regresión: needsApproval se
+	// sobrescribía en cada iteración en vez de acumularse).
+	allowed, needsApproval, rule, err := cp.Decide("systemctl restart nginx && systemctl status nginx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !allowed {
+		t.Fatal("chain must be allowed")
+	}
+	if !needsApproval {
+		t.Error("needsApproval must survive a later command that does not require approval")
+	}
+	if rule != "require_approval:^systemctl restart " {
+		t.Errorf("rule = %q, want the matched approval rule", rule)
+	}
+
+	// Orden inverso: también debe requerir aprobación.
+	_, needsApproval, _, err = cp.Decide("systemctl status nginx && systemctl restart nginx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !needsApproval {
+		t.Error("needsApproval must be set when a later command requires approval")
+	}
+
+	// Sin comando de aprobación en la cadena → no requiere aprobación.
+	_, needsApproval, _, err = cp.Decide("systemctl status nginx && systemctl status redis")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if needsApproval {
+		t.Error("needsApproval must be false when no command matches require_approval")
+	}
+}
+
 func TestResolveDryRunInfoViaLocal(t *testing.T) {
 	t.Parallel()
 	// SignIntent en dry-run no debe emitir cert y debe reportar la decisión.

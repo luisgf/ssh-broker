@@ -210,6 +210,17 @@ func (p PolicyTable) Resolve(in Intent, defaultMaxTTL time.Duration) (Decision, 
 	if !ok {
 		return Decision{}, fmt.Errorf("no policy for host: %q", in.Host)
 	}
+	// Role and Purpose select which constraints apply: command policy is
+	// evaluated only for RoleTarget, and the force-command is baked only for
+	// PurposeOneshot at the target. Both values arrive from the wire, so an
+	// unknown value would silently skip those gates and yield an unrestricted
+	// certificate. Default-deny.
+	if in.Role != RoleTarget && in.Role != RoleBastion {
+		return Decision{}, fmt.Errorf("unknown role %q (must be %q or %q)", in.Role, RoleTarget, RoleBastion)
+	}
+	if in.Purpose != PurposeOneshot && in.Purpose != PurposeSession {
+		return Decision{}, fmt.Errorf("unknown purpose %q (must be %q or %q)", in.Purpose, PurposeOneshot, PurposeSession)
+	}
 	// A newline in a one-shot command smuggles extra command lines past regex
 	// command policies: the force-command runs via the remote shell, which
 	// executes each line, while an allowlist like "^ps" still matches
