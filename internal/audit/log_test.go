@@ -319,7 +319,8 @@ func TestRestoreChainUltimaLineaMalformada(t *testing.T) {
 
 // TestMaybeRotateAplicaRotacion creates a Log with minimal maxFileSize and
 // verifies that after rotation: (a) the rotated file exists and (b) the new
-// log restarts seq from 1 (first entry after rotation has Seq=1).
+// log restarts seq from 1 (first entry after rotation has Seq=1) while its
+// PrevHash seeds from the rotated file's last line (chain continuity).
 func TestMaybeRotateAplicaRotacion(t *testing.T) {
 	t.Parallel()
 	key := testKey()
@@ -352,18 +353,19 @@ func TestMaybeRotateAplicaRotacion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
-	var rotated bool
+	var rotatedName string
 	for _, de := range dirEntries {
 		if de.Name() != "rotate.log" {
-			rotated = true
+			rotatedName = de.Name()
 			break
 		}
 	}
-	if !rotated {
-		t.Error("expected a rotated file (rotate.log.<timestamp>) in the directory")
+	if rotatedName == "" {
+		t.Fatal("expected a rotated file (rotate.log.<timestamp>) in the directory")
 	}
 
-	// The entry written after rotation must have Seq=1 (chain restarted).
+	// The entry written after rotation must have Seq=1 (seq restarts per file)
+	// and its PrevHash must seed from the rotated file's last line.
 	entries := readEntries(t, path)
 	if len(entries) == 0 {
 		t.Fatal("new log must have at least one entry after rotation")
@@ -371,8 +373,88 @@ func TestMaybeRotateAplicaRotacion(t *testing.T) {
 	if entries[0].e.Seq != 1 {
 		t.Errorf("first entry of new log: Seq=%d, want 1", entries[0].e.Seq)
 	}
-	if entries[0].e.PrevHash != "" {
-		t.Errorf("first entry of new log: PrevHash=%q, want \"\"", entries[0].e.PrevHash)
+	rotEntries := readEntries(t, filepath.Join(dir, rotatedName))
+	if len(rotEntries) == 0 {
+		t.Fatal("rotated file must contain the pre-rotation entries")
+	}
+	sum := sha256.Sum256(rotEntries[len(rotEntries)-1].raw)
+	if want := hex.EncodeToString(sum[:]); entries[0].e.PrevHash != want {
+		t.Errorf("first entry of new log: PrevHash=%s, want %s (hash of rotated file's last line)", entries[0].e.PrevHash, want)
+	}
+}
+
+// TestMaybeRotateCadenaContinuaTrasRotacion verifies chain continuity across a
+// rotation boundary: the rotated file's internal chain is intact, the new
+// file's first entry carries prev_hash = hash of the rotated file's last line
+// (the chain seed), and the new file's internal chain continues from there.
+func TestMaybeRotateCadenaContinuaTrasRotacion(t *testing.T) {
+	t.Parallel()
+	key := testKey()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chain.log")
+
+	l, err := Open(path, key)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer l.Close()
+
+	// Three entries before rotation.
+	for i := 0; i < 3; i++ {
+		if err := l.Append(Entry{Outcome: "pre-rotate"}); err != nil {
+			t.Fatalf("Append pre-rotate %d: %v", i, err)
+		}
+	}
+
+	// Force rotation on the next Append.
+	l.mu.Lock()
+	l.maxFileSize = 1
+	l.mu.Unlock()
+	if err := l.Append(Entry{Outcome: "post-rotate-1"}); err != nil {
+		t.Fatalf("Append post-rotate-1: %v", err)
+	}
+	// Disable rotation again and write a second post-rotation entry.
+	l.mu.Lock()
+	l.maxFileSize = 0
+	l.mu.Unlock()
+	if err := l.Append(Entry{Outcome: "post-rotate-2"}); err != nil {
+		t.Fatalf("Append post-rotate-2: %v", err)
+	}
+
+	// Locate the rotated file.
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var rotatedName string
+	for _, de := range dirEntries {
+		if de.Name() != "chain.log" {
+			rotatedName = de.Name()
+		}
+	}
+	if rotatedName == "" {
+		t.Fatal("expected a rotated file in the directory")
+	}
+
+	rotEntries := readEntries(t, filepath.Join(dir, rotatedName))
+	newEntries := readEntries(t, path)
+	if len(rotEntries) != 3 || len(newEntries) != 2 {
+		t.Fatalf("expected 3 rotated + 2 new entries, got %d + %d", len(rotEntries), len(newEntries))
+	}
+
+	// First entry of a brand-new log carries the genesis value (empty).
+	if rotEntries[0].e.PrevHash != "" {
+		t.Errorf("genesis entry PrevHash=%q, want \"\"", rotEntries[0].e.PrevHash)
+	}
+
+	// Verify the full chain across both files as a single sequence.
+	all := append(rotEntries, newEntries...)
+	for i := 1; i < len(all); i++ {
+		sum := sha256.Sum256(all[i-1].raw)
+		want := hex.EncodeToString(sum[:])
+		if all[i].e.PrevHash != want {
+			t.Errorf("entry %d: PrevHash=%s, want %s (chain broken at rotation boundary)", i, all[i].e.PrevHash, want)
+		}
 	}
 }
 

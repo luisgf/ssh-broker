@@ -76,12 +76,13 @@ func testServer(t *testing.T, signerURL string) *server {
 	}
 	t.Cleanup(func() { al.Close() })
 	return &server{
-		remote:    signer.NewRemote(signerURL, nil, time.Second),
-		registry:  control.NewRegistry(time.Minute),
-		notifier:  control.LogNotifier{},
-		behavior:  control.NewBehaviorTracker(control.BehaviorConfig{}), // off by default
-		audit:     al,
-		approveCN: map[string]struct{}{"broker-admin": {}},
+		remote:     signer.NewRemote(signerURL, nil, time.Second),
+		registry:   control.NewRegistry(time.Minute),
+		notifier:   control.LogNotifier{},
+		behavior:   control.NewBehaviorTracker(control.BehaviorConfig{}), // off by default
+		audit:      al,
+		approveCN:  map[string]struct{}{"broker-admin": {}},
+		forwarders: map[string]struct{}{}, // no trusted forwarders by default
 	}
 }
 
@@ -244,6 +245,120 @@ func TestControlPlaneApproverAuthz(t *testing.T) {
 	s.handleApprovalDecide(w, dr)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("non-approver CN must receive 403, got %d", w.Code)
+	}
+}
+
+func TestControlPlaneSelfApprovalRejected(t *testing.T) {
+	sig := stubSigner(t)
+	defer sig.Close()
+	s := testServer(t, sig.URL)
+
+	// broker-admin is both a broker and an approver: it originates a request
+	// requiring approval...
+	w := httptest.NewRecorder()
+	s.handleSign(w, req(t, "POST", "/v1/sign", "broker-admin", wireReq(t, "reboot now")))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("must return 202, got %d: %s", w.Code, w.Body.String())
+	}
+	var acc struct {
+		ApprovalID string `json:"approval_id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &acc)
+
+	// ...and must NOT be able to approve its own request.
+	w = httptest.NewRecorder()
+	dr := req(t, "POST", "/v1/approvals/"+acc.ApprovalID, "broker-admin", map[string]bool{"approve": true})
+	dr.SetPathValue("id", acc.ApprovalID)
+	s.handleApprovalDecide(w, dr)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("self-approval must return 403, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The request must remain pending (decidable by another approver later).
+	w = httptest.NewRecorder()
+	rr := req(t, "GET", "/v1/sign/result/"+acc.ApprovalID, "broker-admin", nil)
+	rr.SetPathValue("id", acc.ApprovalID)
+	s.handleResult(w, rr)
+	if w.Code != http.StatusAccepted {
+		t.Errorf("after rejected self-approval the request must stay pending (202), got %d", w.Code)
+	}
+}
+
+func TestGuardrailSubject(t *testing.T) {
+	t.Parallel()
+	s := &server{forwarders: map[string]struct{}{"trusted-broker": {}}}
+	tests := []struct {
+		name     string
+		brokerCN string
+		endUser  string
+		want     string
+	}{
+		{"untrusted-ignores-enduser", "broker-1", "alice", "broker-1"},
+		{"untrusted-no-enduser", "broker-1", "", "broker-1"},
+		{"trusted-qualifies-enduser", "trusted-broker", "alice", "trusted-broker:alice"},
+		{"trusted-empty-enduser", "trusted-broker", "", "trusted-broker"},
+	}
+	for _, tc := range tests {
+		tc := tc // capture range variable
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := s.guardrailSubject(tc.brokerCN, tc.endUser); got != tc.want {
+				t.Errorf("guardrailSubject(%q, %q) = %q, want %q", tc.brokerCN, tc.endUser, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestControlPlaneBehaviorSubjectIgnoresUntrustedEndUser(t *testing.T) {
+	sig := stubSigner(t)
+	defer sig.Close()
+	s := testServer(t, sig.URL)
+	s.behavior = control.NewBehaviorTracker(control.BehaviorConfig{Mode: control.BehaviorEnforce, RateLimitPerMin: 2})
+
+	// broker-1 is NOT a trusted forwarder: rotating end_user must not reset
+	// the rate-limit window (all requests share the broker-1 subject).
+	endUsers := []string{"alice", "bob", "carol"}
+	codes := make([]int, 0, 3)
+	for _, eu := range endUsers {
+		r := wireReq(t, "uptime")
+		r.EndUser = eu
+		w := httptest.NewRecorder()
+		s.handleSign(w, signReq(t, "broker-1", r))
+		codes = append(codes, w.Code)
+	}
+	if codes[2] != http.StatusTooManyRequests {
+		t.Errorf("rotating end_user must not evade the rate limit (3rd request must be 429), got %v", codes)
+	}
+}
+
+func TestControlPlaneBehaviorSubjectTrustedForwarder(t *testing.T) {
+	sig := stubSigner(t)
+	defer sig.Close()
+	s := testServer(t, sig.URL)
+	s.behavior = control.NewBehaviorTracker(control.BehaviorConfig{Mode: control.BehaviorEnforce, RateLimitPerMin: 2})
+	s.forwarders = map[string]struct{}{"broker-1": {}}
+
+	// broker-1 IS a trusted forwarder: distinct end users get separate
+	// per-subject windows, so three requests with different end_user pass.
+	for _, eu := range []string{"alice", "bob", "carol"} {
+		r := wireReq(t, "uptime")
+		r.EndUser = eu
+		w := httptest.NewRecorder()
+		s.handleSign(w, signReq(t, "broker-1", r))
+		if w.Code != http.StatusOK {
+			t.Fatalf("trusted forwarder: end_user %q must get its own window (200), got %d: %s", eu, w.Code, w.Body.String())
+		}
+	}
+
+	// The same end user is still rate-limited within its window.
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		r := wireReq(t, "uptime")
+		r.EndUser = "alice"
+		w := httptest.NewRecorder()
+		s.handleSign(w, signReq(t, "broker-1", r))
+		if w.Code != want {
+			t.Errorf("repeat request %d for alice: got %d, want %d", i, w.Code, want)
+		}
 	}
 }
 

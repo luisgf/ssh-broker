@@ -32,6 +32,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -41,6 +42,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"github.com/luisgf/ssh-broker/internal/audit"
 )
 
 const defaultConfig = "./signer.json"
@@ -201,14 +204,12 @@ func cmdHostAdd(args []string) {
 		hp.AllowedCallers = splitComma(*callers)
 	}
 
-	// Detect whether any command-policy flag was explicitly set.
-	policySet := false
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "policy-mode", "allow", "deny", "require-approval", "shell-parse":
-			policySet = true
-		}
-	})
+	// Record which flags were explicitly set: a --force update must only
+	// override the fields the user actually passed (see mergeUnsetHostFields).
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+	policySet := setFlags["policy-mode"] || setFlags["allow"] || setFlags["deny"] ||
+		setFlags["require-approval"] || setFlags["shell-parse"]
 
 	raw, err := loadRaw(*config)
 	if err != nil {
@@ -219,13 +220,15 @@ func cmdHostAdd(args []string) {
 		fatalf("parsing hosts: %v", err)
 	}
 
-	// Check existence before modifying; preserve CommandPolicy on --force without policy flags.
+	// Check existence before modifying; on --force start from the existing
+	// entry and override only the explicitly set flags.
 	action := "added"
 	if existing, exists := hosts[*name]; exists {
 		if !*force {
 			fatalf("host %q already exists (use --force to overwrite)", *name)
 		}
 		action = "updated"
+		mergeUnsetHostFields(&hp, existing, setFlags)
 		if !policySet {
 			hp.CommandPolicy = existing.CommandPolicy
 		}
@@ -242,14 +245,56 @@ func cmdHostAdd(args []string) {
 	if err := writeHosts(*config, raw, hosts); err != nil {
 		fatalf("writing config: %v", err)
 	}
-	fmt.Printf("host %q %s (addr=%s, user=%s, principal=%s)\n", *name, action, *addr, *user, *principal)
+	fmt.Printf("host %q %s (addr=%s, user=%s, principal=%s)\n", *name, action, hp.Addr, hp.User, hp.Principal)
+}
+
+// mergeUnsetHostFields copies from existing every field whose flag the user
+// did not explicitly set, so a --force update only overrides the requested
+// fields instead of silently resetting the rest to flag defaults. Flags set
+// to an explicit empty value (e.g. --groups "") still override, because
+// flag.Visit fires for them. addr, user and host-key/scan are required flags,
+// so they are always explicitly set and never merged from existing.
+func mergeUnsetHostFields(hp *hostEntry, existing hostEntry, set map[string]bool) {
+	if !set["principal"] {
+		hp.Principal = existing.Principal
+	}
+	if !set["ttl"] {
+		hp.MaxTTLSeconds = existing.MaxTTLSeconds
+	}
+	if !set["jump"] {
+		hp.Jump = existing.Jump
+	}
+	if !set["source-address"] {
+		hp.SourceAddress = existing.SourceAddress
+	}
+	if !set["bastion"] {
+		hp.AllowAsBastion = existing.AllowAsBastion
+	}
+	if !set["sudo"] {
+		hp.AllowSudo = existing.AllowSudo
+	}
+	if !set["sudo-users"] {
+		hp.AllowedSudoUsers = existing.AllowedSudoUsers
+	}
+	if !set["pty"] {
+		hp.AllowPTY = existing.AllowPTY
+	}
+	if !set["groups"] {
+		hp.Groups = existing.Groups
+	}
+	if !set["callers"] {
+		hp.AllowedCallers = existing.AllowedCallers
+	}
 }
 
 // acquireHostKey resolves the host key from --host-key / stdin / ssh-keyscan.
 func acquireHostKey(scan bool, hostKeyFlag, addr string) (string, error) {
 	if scan {
-		host, _, _ := strings.Cut(addr, ":")
-		return sshKeyscan(host)
+		host, port, err := splitHostPortDefault(addr)
+		if err != nil {
+			return "", fmt.Errorf("parsing addr %q: %w", addr, err)
+		}
+		return sshKeyscan(host, port)
 	}
 	if hostKeyFlag == "-" {
 		var buf bytes.Buffer
@@ -398,7 +443,11 @@ func cmdHostRemove(args []string) {
 
 // ── ca-keys ───────────────────────────────────────────────────────────────────
 
-// caKeyEntry is the JSON representation of a CA key in the ca_keys map.
+// caKeyEntry models only the ca.CAKeyConfig fields that broker-ctl can set via
+// flags; it is used to build new entries and to render the list view. Entries
+// are stored as raw JSON (see extractCAKeys) so the fields not modeled here
+// (key_version, tenant_id, client_id, client_secret_env) are never stripped
+// from entries broker-ctl does not touch.
 type caKeyEntry struct {
 	Type     string `json:"type"`
 	Path     string `json:"path,omitempty"`
@@ -456,7 +505,12 @@ func cmdCAKeysAdd(args []string) {
 		fatalf("unsupported type %q: use pem or akv", *keyType)
 	}
 
-	entry := caKeyEntry{Type: *keyType, Path: *path, VaultURL: *vaultURL, KeyName: *keyName}
+	// The new entry contains exactly the fields provided via flags (omitempty
+	// drops the rest); existing entries are left untouched as raw JSON.
+	entryJSON, err := json.Marshal(caKeyEntry{Type: *keyType, Path: *path, VaultURL: *vaultURL, KeyName: *keyName})
+	if err != nil {
+		fatalf("serialising entry: %v", err)
+	}
 
 	raw, err := loadRaw(*config)
 	if err != nil {
@@ -474,7 +528,7 @@ func cmdCAKeysAdd(args []string) {
 		}
 		action = "updated"
 	}
-	keys[*name] = entry
+	keys[*name] = entryJSON
 	if err := writeCAKeys(*config, raw, keys); err != nil {
 		fatalf("writing config: %v", err)
 	}
@@ -509,7 +563,10 @@ func cmdCAKeysList(args []string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tTYPE\tDETAIL")
 	for _, n := range names {
-		k := keys[n]
+		var k caKeyEntry
+		if err := json.Unmarshal(keys[n], &k); err != nil {
+			fatalf("parsing ca_keys entry %q: %v", n, err)
+		}
 		detail := k.Path
 		if k.Type == "akv" {
 			detail = k.VaultURL + " (key: " + k.KeyName + ")"
@@ -552,24 +609,27 @@ func cmdCAKeysRemove(args []string) {
 	fmt.Printf("ca-key %q removed\n", name)
 }
 
-// extractCAKeys extracts and parses the "ca_keys" key from the raw map.
-func extractCAKeys(raw map[string]json.RawMessage) (map[string]caKeyEntry, error) {
+// extractCAKeys extracts the "ca_keys" map from the raw map, keeping each
+// entry as raw JSON. Only the entry being added or removed is ever decoded or
+// encoded, so all other entries round-trip untouched — the same
+// preserve-unknown-fields approach loadRaw applies to the top-level config.
+func extractCAKeys(raw map[string]json.RawMessage) (map[string]json.RawMessage, error) {
 	keysRaw, ok := raw["ca_keys"]
 	if !ok {
-		return map[string]caKeyEntry{}, nil
+		return map[string]json.RawMessage{}, nil
 	}
-	var keys map[string]caKeyEntry
+	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(keysRaw, &keys); err != nil {
 		return nil, err
 	}
 	if keys == nil {
-		keys = map[string]caKeyEntry{}
+		keys = map[string]json.RawMessage{}
 	}
 	return keys, nil
 }
 
 // writeCAKeys serialises ca_keys back into the raw map and writes the file.
-func writeCAKeys(path string, raw map[string]json.RawMessage, keys map[string]caKeyEntry) error {
+func writeCAKeys(path string, raw map[string]json.RawMessage, keys map[string]json.RawMessage) error {
 	keysJSON, err := json.MarshalIndent(keys, "  ", "  ")
 	if err != nil {
 		return err
@@ -1040,9 +1100,32 @@ func isAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
-// sshKeyscan runs ssh-keyscan and extracts the first ed25519 line.
-func sshKeyscan(host string) (string, error) {
-	out, err := exec.Command("ssh-keyscan", "-t", "ed25519", host).Output()
+// splitHostPortDefault splits addr into host and port, defaulting to port 22
+// when addr carries no port. Bracketed IPv6 literals ("[::1]:2222", "[::1]")
+// and bare IPv6 literals ("2001:db8::1") are handled correctly.
+func splitHostPortDefault(addr string) (host, port string, err error) {
+	host, port, err = net.SplitHostPort(addr)
+	if err == nil {
+		if port == "" { // trailing colon, e.g. "web01:"
+			port = "22"
+		}
+		return host, port, nil
+	}
+	// "missing port": bare hostname or "[v6]". "too many colons": bare IPv6
+	// literal. In both cases the whole addr is the host; default the port.
+	var aerr *net.AddrError
+	if errors.As(err, &aerr) &&
+		(strings.Contains(aerr.Err, "missing port") || strings.Contains(aerr.Err, "too many colons")) {
+		host = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+		return host, "22", nil
+	}
+	return "", "", err
+}
+
+// sshKeyscan runs ssh-keyscan against host:port and extracts the first
+// ed25519 line.
+func sshKeyscan(host, port string) (string, error) {
+	out, err := exec.Command("ssh-keyscan", "-p", port, "-t", "ed25519", host).Output()
 	if err != nil {
 		return "", fmt.Errorf("ssh-keyscan failed: %w", err)
 	}
@@ -1107,29 +1190,12 @@ func must(err error) {
 }
 
 // ── audit ─────────────────────────────────────────────────────────────────────
-
-// auditEntry mirrors internal/audit.Entry without importing that package.
-// Field order must be identical for Ed25519 signature verification: json.Marshal
-// produces fields in struct-definition order, so any divergence breaks --key.
-type auditEntry struct {
-	Time      time.Time `json:"time"`
-	Caller    string    `json:"caller"`
-	Host      string    `json:"host"`
-	User      string    `json:"user"`
-	Principal string    `json:"principal"`
-	Command   string    `json:"command"`
-	TTL       string    `json:"ttl"`
-	Serial    uint64    `json:"serial"`
-	SessionID string    `json:"session_id,omitempty"`
-	Outcome   string    `json:"outcome"`
-	ExitCode  int       `json:"exit_code"`
-	Err       string    `json:"err,omitempty"`
-	Elevation string    `json:"elevation,omitempty"`
-	PTY       bool      `json:"pty,omitempty"`
-	Seq       uint64    `json:"seq"`
-	PrevHash  string    `json:"prev_hash"`
-	Sig       string    `json:"sig"`
-}
+//
+// This file uses internal/audit.Entry directly (cmd/ may import internal
+// packages of the same module). Ed25519 verification re-marshals the entry
+// with Sig="" exactly like the producer (audit.Log.Append), so producer and
+// verifier can never drift: a mirror struct missing a signed field would make
+// every entry carrying that field fail --key verification.
 
 func cmdAudit(args []string) {
 	if len(args) == 0 {
@@ -1231,7 +1297,7 @@ func cmdAuditShow(args []string) {
 		if len(line) == 0 {
 			continue
 		}
-		var e auditEntry
+		var e audit.Entry
 		if err := json.Unmarshal(line, &e); err != nil {
 			continue // skip malformed lines silently
 		}
@@ -1309,74 +1375,9 @@ func cmdAuditVerify(args []string) {
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 256*1024), 256*1024)
-
-	var prevHash string
-	var prevSeq uint64
-	total, errs := 0, 0
-	first := true
-
-	for sc.Scan() {
-		rawLine := sc.Bytes()
-		if len(rawLine) == 0 {
-			continue
-		}
-		// Copy before next Scan() invalidates the buffer.
-		line := make([]byte, len(rawLine))
-		copy(line, rawLine)
-
-		var e auditEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: malformed JSON (seq %d): %v\n", e.Seq, err)
-			errs++
-			continue
-		}
-		total++
-
-		// 1. Sequence monotonicity.
-		if !first && e.Seq != prevSeq+1 {
-			fmt.Fprintf(os.Stderr, "ERROR: seq %d — expected %d (gap or reorder)\n", e.Seq, prevSeq+1)
-			errs++
-		}
-
-		// 2. Hash chain: prev_hash of entry N must equal SHA-256 of raw line N-1.
-		if !first && e.PrevHash != prevHash {
-			fmt.Fprintf(os.Stderr, "ERROR: seq %d — prev_hash mismatch\n  expected: %s\n  got:      %s\n",
-				e.Seq, prevHash, e.PrevHash)
-			errs++
-		}
-
-		// 3. Ed25519 signature (optional).
-		if pubKey != nil {
-			sigB64 := e.Sig
-			sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ERROR: seq %d — invalid sig encoding: %v\n", e.Seq, err)
-				errs++
-			} else {
-				// Canonical payload is the entry marshaled with Sig="".
-				e.Sig = ""
-				payload, merr := json.Marshal(e)
-				if merr != nil {
-					fmt.Fprintf(os.Stderr, "ERROR: seq %d — marshal for sig check: %v\n", e.Seq, merr)
-					errs++
-				} else if !ed25519.Verify(pubKey, payload, sigBytes) {
-					fmt.Fprintf(os.Stderr, "ERROR: seq %d — signature invalid\n", e.Seq)
-					errs++
-				}
-				e.Sig = sigB64
-			}
-		}
-
-		sum := sha256.Sum256(line)
-		prevHash = hex.EncodeToString(sum[:])
-		prevSeq = e.Seq
-		first = false
-	}
-	if err := sc.Err(); err != nil {
-		fatalf("read error: %v", err)
-	}
+	total, errs := verifyAuditChain(f, pubKey, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "ERROR: "+format+"\n", args...)
+	})
 
 	if errs == 0 {
 		if pubKey != nil {
@@ -1390,6 +1391,89 @@ func cmdAuditVerify(args []string) {
 	}
 }
 
+// verifyAuditChain checks sequence monotonicity, the prev_hash chain and,
+// when pubKey is non-nil, the Ed25519 signature of every entry read from r.
+// The first line's prev_hash is treated as the chain seed: after log rotation
+// the first entry of a file carries the hash of the last entry of the previous
+// file, so any seed value is accepted and continuity is verified from there.
+// Each problem is reported through reportf; returns (entries read, errors).
+func verifyAuditChain(r io.Reader, pubKey ed25519.PublicKey, reportf func(format string, args ...any)) (total, errs int) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 256*1024), 256*1024)
+
+	var prevHash string
+	var prevSeq uint64
+	first := true
+
+	for sc.Scan() {
+		rawLine := sc.Bytes()
+		if len(rawLine) == 0 {
+			continue
+		}
+		// Copy before next Scan() invalidates the buffer.
+		line := make([]byte, len(rawLine))
+		copy(line, rawLine)
+
+		var e audit.Entry
+		if err := json.Unmarshal(line, &e); err != nil {
+			reportf("malformed JSON: %v", err)
+			errs++
+			continue
+		}
+		total++
+
+		// 1. Sequence monotonicity.
+		if !first && e.Seq != prevSeq+1 {
+			reportf("seq %d — expected %d (gap or reorder)", e.Seq, prevSeq+1)
+			errs++
+		}
+
+		// 2. Hash chain: prev_hash of entry N must equal SHA-256 of raw line N-1.
+		if !first && e.PrevHash != prevHash {
+			reportf("seq %d — prev_hash mismatch\n  expected: %s\n  got:      %s",
+				e.Seq, prevHash, e.PrevHash)
+			errs++
+		}
+
+		// 3. Ed25519 signature (optional).
+		if pubKey != nil {
+			errs += verifyEntrySig(e, pubKey, reportf)
+		}
+
+		sum := sha256.Sum256(line)
+		prevHash = hex.EncodeToString(sum[:])
+		prevSeq = e.Seq
+		first = false
+	}
+	if err := sc.Err(); err != nil {
+		reportf("read error: %v", err)
+		errs++
+	}
+	return total, errs
+}
+
+// verifyEntrySig checks the Ed25519 signature of a single entry. The canonical
+// payload is the entry re-marshaled with Sig="" — exactly what the producer
+// signs in audit.Log.Append. Returns the number of errors reported (0 or 1).
+func verifyEntrySig(e audit.Entry, pubKey ed25519.PublicKey, reportf func(format string, args ...any)) int {
+	sigBytes, err := base64.StdEncoding.DecodeString(e.Sig)
+	if err != nil {
+		reportf("seq %d — invalid sig encoding: %v", e.Seq, err)
+		return 1
+	}
+	e.Sig = ""
+	payload, err := json.Marshal(e)
+	if err != nil {
+		reportf("seq %d — marshal for sig check: %v", e.Seq, err)
+		return 1
+	}
+	if !ed25519.Verify(pubKey, payload, sigBytes) {
+		reportf("seq %d — signature invalid", e.Seq)
+		return 1
+	}
+	return 0
+}
+
 // printAuditHeader writes the column header for the audit table.
 func printAuditHeader(w *tabwriter.Writer) {
 	fmt.Fprintln(w, "TIME\tSEQ\tCALLER\tHOST\tOUTCOME\tSERIAL\tDETAIL")
@@ -1397,7 +1481,7 @@ func printAuditHeader(w *tabwriter.Writer) {
 
 // printAuditLine parses a raw JSON line and appends one table row.
 func printAuditLine(w *tabwriter.Writer, line []byte) {
-	var e auditEntry
+	var e audit.Entry
 	if err := json.Unmarshal(line, &e); err != nil {
 		return
 	}
@@ -1405,14 +1489,15 @@ func printAuditLine(w *tabwriter.Writer, line []byte) {
 }
 
 // printAuditRow formats a single audit entry as a tab-delimited row.
-func printAuditRow(w *tabwriter.Writer, e auditEntry) {
+func printAuditRow(w *tabwriter.Writer, e audit.Entry) {
 	t := e.Time.UTC().Format("2006-01-02T15:04:05Z")
 	fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%d\t%s\n",
 		t, e.Seq, e.Caller, e.Host, e.Outcome, e.Serial, auditDetail(e))
 }
 
-// auditDetail builds the DETAIL column: command + [sudo:X] [pty] [err: ...].
-func auditDetail(e auditEntry) string {
+// auditDetail builds the DETAIL column: command + [sudo:X] [pty] [rule: ...]
+// [dry-run] [approved-by: ...] [anomaly: ...] [err: ...].
+func auditDetail(e audit.Entry) string {
 	var b strings.Builder
 	b.WriteString(e.Command)
 	if e.Elevation != "" {
@@ -1420,6 +1505,18 @@ func auditDetail(e auditEntry) string {
 	}
 	if e.PTY {
 		b.WriteString(" [pty]")
+	}
+	if e.PolicyRule != "" {
+		fmt.Fprintf(&b, " [rule: %s]", e.PolicyRule)
+	}
+	if e.DryRun {
+		b.WriteString(" [dry-run]")
+	}
+	if e.ApprovedBy != "" {
+		fmt.Fprintf(&b, " [approved-by: %s]", e.ApprovedBy)
+	}
+	if e.Anomaly != "" {
+		fmt.Fprintf(&b, " [anomaly: %s]", e.Anomaly)
 	}
 	if e.Err != "" {
 		fmt.Fprintf(&b, " [err: %s]", e.Err)

@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,17 +63,15 @@ func writeSeedFile(t *testing.T, key ed25519.PrivateKey) string {
 	return path
 }
 
-// runVerify invokes cmdAuditVerify logic directly (no exec) and captures the
-// result. Returns (stdout, stderr, ok). Since cmdAuditVerify calls os.Exit(1)
-// on error, we use the internal logic directly — verifyLog is extracted to be
-// testable.
+// runVerify invokes the real verification logic (verifyAuditChain, the same
+// function cmdAuditVerify uses) and captures the result. Returns
+// (stdout lines, stderr lines, ok).
 func runVerify(t *testing.T, logPath, keyPath string) (outLines []string, errLines []string, ok bool) {
 	t.Helper()
 	return verifyLog(logPath, keyPath)
 }
 
-// verifyLog is the logic extracted from cmdAuditVerify without os.Exit, for
-// testing. Returns (stdout lines, stderr lines, ok).
+// verifyLog wraps verifyAuditChain without os.Exit, for testing.
 func verifyLog(logPath, keyPath string) (outLines []string, errLines []string, ok bool) {
 	var pubKey ed25519.PublicKey
 	if keyPath != "" {
@@ -94,65 +92,11 @@ func verifyLog(logPath, keyPath string) (outLines []string, errLines []string, o
 	}
 	defer f.Close()
 
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 256*1024), 256*1024)
-
-	var prevHash string
-	var prevSeq uint64
-	total, errs := 0, 0
-	first := true
-
-	for sc.Scan() {
-		rawLine := sc.Bytes()
-		if len(rawLine) == 0 {
-			continue
-		}
-		line := make([]byte, len(rawLine))
-		copy(line, rawLine)
-
-		var e auditEntry
-		if err := json.Unmarshal(line, &e); err != nil {
-			errLines = append(errLines, "malformed JSON")
-			errs++
-			continue
-		}
-		total++
-
-		if !first && e.Seq != prevSeq+1 {
-			errLines = append(errLines, "seq gap")
-			errs++
-		}
-		if !first && e.PrevHash != prevHash {
-			errLines = append(errLines, "prev_hash mismatch")
-			errs++
-		}
-
-		if pubKey != nil {
-			sigB64 := e.Sig
-			sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
-			if err != nil {
-				errLines = append(errLines, "invalid sig encoding")
-				errs++
-			} else {
-				e.Sig = ""
-				payload, merr := json.Marshal(e)
-				if merr == nil && !ed25519.Verify(pubKey, payload, sigBytes) {
-					errLines = append(errLines, "signature invalid")
-					errs++
-				}
-				e.Sig = sigB64
-			}
-		}
-
-		sum := sha256.Sum256(line)
-		prevHash = hex.EncodeToString(sum[:])
-		prevSeq = e.Seq
-		first = false
-	}
-
+	_, errs := verifyAuditChain(f, pubKey, func(format string, args ...any) {
+		errLines = append(errLines, fmt.Sprintf(format, args...))
+	})
 	if errs == 0 {
-		outLines = append(outLines, "OK")
-		return outLines, nil, true
+		return []string{"OK"}, nil, true
 	}
 	return nil, errLines, false
 }
@@ -220,7 +164,7 @@ func TestVerifyLogGapEnSecuencia(t *testing.T) {
 
 	// Build entries manually to be able to introduce the gap.
 	makeEntry := func(seq uint64, prevHash string) ([]byte, string) {
-		e := auditEntry{
+		e := audit.Entry{
 			Time:     time.Now().UTC(),
 			Caller:   "caller",
 			Host:     "h:22",
@@ -259,13 +203,13 @@ func TestVerifyLogGapEnSecuencia(t *testing.T) {
 	}
 	found := false
 	for _, e := range errLines {
-		if strings.Contains(e, "seq gap") {
+		if strings.Contains(e, "gap or reorder") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("expected 'seq gap' error, got: %v", errLines)
+		t.Errorf("expected 'gap or reorder' error, got: %v", errLines)
 	}
 }
 
@@ -277,7 +221,7 @@ func TestVerifyLogPrevHashIncorrecto(t *testing.T) {
 	key := testAuditKey()
 
 	makeEntry := func(seq uint64, prevHash string) []byte {
-		e := auditEntry{
+		e := audit.Entry{
 			Time:     time.Now().UTC(),
 			Caller:   "caller",
 			Outcome:  "executed",
@@ -340,7 +284,7 @@ func TestVerifyLogFirmaManipulada(t *testing.T) {
 	}
 
 	// Alter Caller in the second entry.
-	var e auditEntry
+	var e audit.Entry
 	if err := json.Unmarshal(lines[1], &e); err != nil {
 		t.Fatalf("unmarshal line 2: %v", err)
 	}
@@ -381,6 +325,83 @@ func TestVerifyLogVacio(t *testing.T) {
 	_, errLines, ok := runVerify(t, path, "")
 	if !ok {
 		t.Fatalf("empty log must pass verification, errors: %v", errLines)
+	}
+}
+
+// TestVerifyLogConCamposDeAprobacionYAnomalia is a regression test: the old
+// mirror struct dropped policy_rule, dry_run, approval_id, approved_by and
+// anomaly when re-marshaling, so any entry carrying one of those fields failed
+// --key verification. With audit.Entry imported directly they must verify.
+func TestVerifyLogConCamposDeAprobacionYAnomalia(t *testing.T) {
+	t.Parallel()
+	key := testAuditKey()
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l, err := audit.Open(path, key)
+	if err != nil {
+		t.Fatalf("audit.Open: %v", err)
+	}
+	entries := []audit.Entry{
+		{Caller: "c", Host: "h:22", Command: "reboot", Outcome: "executed",
+			PolicyRule: "^reboot$", ApprovalID: "req-123", ApprovedBy: "admin"},
+		{Caller: "c", Host: "h:22", Command: "rm -rf /tmp/x", Outcome: "denied", DryRun: true},
+		{Caller: "c", Host: "new:22", Command: "id", Outcome: "executed", Anomaly: "new-host:new"},
+	}
+	for i, e := range entries {
+		if err := l.Append(e); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	l.Close()
+	seedPath := writeSeedFile(t, key)
+
+	_, errLines, ok := runVerify(t, path, seedPath)
+	if !ok {
+		t.Fatalf("entries with approval/anomaly fields must pass --key verification, errors: %v", errLines)
+	}
+}
+
+// TestVerifyLogSemillaDeRotacion verifies that a file whose FIRST line carries
+// a non-empty prev_hash (chain continuity across rotated files) is accepted:
+// the first line's prev_hash is the chain seed, not a required empty genesis.
+func TestVerifyLogSemillaDeRotacion(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "rotated.log")
+	key := testAuditKey()
+
+	makeEntry := func(seq uint64, prevHash string) ([]byte, string) {
+		e := audit.Entry{
+			Time:     time.Now().UTC(),
+			Caller:   "caller",
+			Host:     "h:22",
+			Outcome:  "executed",
+			Seq:      seq,
+			PrevHash: prevHash,
+		}
+		payload, _ := json.Marshal(e)
+		sig := ed25519.Sign(key, payload)
+		e.Sig = base64.StdEncoding.EncodeToString(sig)
+		line, _ := json.Marshal(e)
+		sum := sha256.Sum256(line)
+		return line, hex.EncodeToString(sum[:])
+	}
+
+	// First entry carries the hash of the last entry of the previous file.
+	var buf bytes.Buffer
+	line1, hash1 := makeEntry(1, strings.Repeat("ab", 32))
+	buf.Write(line1)
+	buf.WriteByte('\n')
+	line2, _ := makeEntry(2, hash1)
+	buf.Write(line2)
+	buf.WriteByte('\n')
+
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	seedPath := writeSeedFile(t, key)
+	_, errLines, ok := runVerify(t, path, seedPath)
+	if !ok {
+		t.Fatalf("rotated file with non-empty seed prev_hash must pass, errors: %v", errLines)
 	}
 }
 
@@ -495,14 +516,20 @@ func TestBoolStr(t *testing.T) {
 func TestAuditDetail(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		e    auditEntry
+		e    audit.Entry
 		want string
 	}{
-		{auditEntry{Command: "uptime"}, "uptime"},
-		{auditEntry{Command: "id", Elevation: "sudo:root"}, "id [sudo:root]"},
-		{auditEntry{Command: "id", PTY: true}, "id [pty]"},
-		{auditEntry{Command: "id", Err: "timeout"}, "id [err: timeout]"},
-		{auditEntry{Command: "id", Elevation: "sudo:root", PTY: true, Err: "fail"}, "id [sudo:root] [pty] [err: fail]"},
+		{audit.Entry{Command: "uptime"}, "uptime"},
+		{audit.Entry{Command: "id", Elevation: "sudo:root"}, "id [sudo:root]"},
+		{audit.Entry{Command: "id", PTY: true}, "id [pty]"},
+		{audit.Entry{Command: "id", Err: "timeout"}, "id [err: timeout]"},
+		{audit.Entry{Command: "id", Elevation: "sudo:root", PTY: true, Err: "fail"}, "id [sudo:root] [pty] [err: fail]"},
+		{audit.Entry{Command: "id", PolicyRule: "^id$"}, "id [rule: ^id$]"},
+		{audit.Entry{Command: "id", DryRun: true}, "id [dry-run]"},
+		{audit.Entry{Command: "reboot", ApprovedBy: "admin"}, "reboot [approved-by: admin]"},
+		{audit.Entry{Command: "id", Anomaly: "rate-exceeded"}, "id [anomaly: rate-exceeded]"},
+		{audit.Entry{Command: "reboot", PolicyRule: "^reboot$", ApprovedBy: "admin", Anomaly: "new-host:web02"},
+			"reboot [rule: ^reboot$] [approved-by: admin] [anomaly: new-host:web02]"},
 	}
 	for _, c := range cases {
 		got := auditDetail(c.e)
@@ -627,18 +654,35 @@ func TestExtractCAKeysParsed(t *testing.T) {
 	if len(keys) != 2 {
 		t.Fatalf("expected 2 keys, got %d", len(keys))
 	}
-	if keys["_default"].Type != "pem" {
-		t.Errorf("_default.type = %q, want pem", keys["_default"].Type)
+	var def, prod caKeyEntry
+	if err := json.Unmarshal(keys["_default"], &def); err != nil {
+		t.Fatal(err)
 	}
-	if keys["_default"].Path != "/etc/ca.key" {
-		t.Errorf("_default.path = %q, want /etc/ca.key", keys["_default"].Path)
+	if err := json.Unmarshal(keys["prod"], &prod); err != nil {
+		t.Fatal(err)
 	}
-	if keys["prod"].Type != "akv" {
-		t.Errorf("prod.type = %q, want akv", keys["prod"].Type)
+	if def.Type != "pem" {
+		t.Errorf("_default.type = %q, want pem", def.Type)
 	}
-	if keys["prod"].VaultURL != "https://v.vault.azure.net" {
-		t.Errorf("prod.vault_url = %q", keys["prod"].VaultURL)
+	if def.Path != "/etc/ca.key" {
+		t.Errorf("_default.path = %q, want /etc/ca.key", def.Path)
 	}
+	if prod.Type != "akv" {
+		t.Errorf("prod.type = %q, want akv", prod.Type)
+	}
+	if prod.VaultURL != "https://v.vault.azure.net" {
+		t.Errorf("prod.vault_url = %q", prod.VaultURL)
+	}
+}
+
+// mustMarshalCAKey marshals a caKeyEntry as raw JSON, as cmdCAKeysAdd does.
+func mustMarshalCAKey(t *testing.T, e caKeyEntry) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal caKeyEntry: %v", err)
+	}
+	return b
 }
 
 func TestCAKeysRoundTrip(t *testing.T) {
@@ -658,8 +702,8 @@ func TestCAKeysRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	keys["_default"] = caKeyEntry{Type: "pem", Path: "/new/ca.key"}
-	keys["prod"] = caKeyEntry{Type: "akv", VaultURL: "https://prod.vault.azure.net", KeyName: "ssh-ca"}
+	keys["_default"] = mustMarshalCAKey(t, caKeyEntry{Type: "pem", Path: "/new/ca.key"})
+	keys["prod"] = mustMarshalCAKey(t, caKeyEntry{Type: "akv", VaultURL: "https://prod.vault.azure.net", KeyName: "ssh-ca"})
 	if err := writeCAKeys(cfgPath, raw, keys); err != nil {
 		t.Fatal(err)
 	}
@@ -673,11 +717,18 @@ func TestCAKeysRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if k := keys2["_default"]; k.Type != "pem" || k.Path != "/new/ca.key" {
-		t.Errorf("_default not preserved: %+v", k)
+	var def, prod caKeyEntry
+	if err := json.Unmarshal(keys2["_default"], &def); err != nil {
+		t.Fatal(err)
 	}
-	if k := keys2["prod"]; k.Type != "akv" || k.KeyName != "ssh-ca" {
-		t.Errorf("prod not preserved: %+v", k)
+	if err := json.Unmarshal(keys2["prod"], &prod); err != nil {
+		t.Fatal(err)
+	}
+	if def.Type != "pem" || def.Path != "/new/ca.key" {
+		t.Errorf("_default not preserved: %+v", def)
+	}
+	if prod.Type != "akv" || prod.KeyName != "ssh-ca" {
+		t.Errorf("prod not preserved: %+v", prod)
 	}
 	// Original ca_key field must still be present (other fields preserved).
 	if _, ok := raw2["ca_key"]; !ok {
@@ -721,6 +772,85 @@ func TestCAKeysRemoveRoundTrip(t *testing.T) {
 	}
 	if _, exists := keys2["_default"]; !exists {
 		t.Error("_default must still be present")
+	}
+}
+
+// TestCAKeysAddRemovePreservaCamposAKV is a regression test: the old 4-field
+// mirror struct re-serialised the whole ca_keys map on every add/remove,
+// silently stripping key_version, tenant_id, client_id and client_secret_env
+// from ALL entries. Entries not being touched must round-trip intact.
+func TestCAKeysAddRemovePreservaCamposAKV(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "signer.json")
+	initial := `{"ca_keys":{"prod":{"type":"akv","vault_url":"https://v.vault.azure.net","key_name":"ca","key_version":"abc123","tenant_id":"tid-1","client_id":"cid-1","client_secret_env":"AKV_SECRET"}},"hosts":{}}`
+	if err := os.WriteFile(cfgPath, []byte(initial), 0640); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Add an unrelated entry (as cmdCAKeysAdd does), then remove it again.
+	raw, err := loadRaw(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := extractCAKeys(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys["lab"] = mustMarshalCAKey(t, caKeyEntry{Type: "pem", Path: "/lab/ca.key"})
+	if err := writeCAKeys(cfgPath, raw, keys); err != nil {
+		t.Fatal(err)
+	}
+
+	raw2, err := loadRaw(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys2, err := extractCAKeys(raw2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(keys2, "lab")
+	if err := writeCAKeys(cfgPath, raw2, keys2); err != nil {
+		t.Fatal(err)
+	}
+
+	// The prod entry must still carry every AKV field.
+	raw3, err := loadRaw(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys3, err := extractCAKeys(raw3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var prod map[string]string
+	if err := json.Unmarshal(keys3["prod"], &prod); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"type": "akv", "vault_url": "https://v.vault.azure.net", "key_name": "ca",
+		"key_version": "abc123", "tenant_id": "tid-1", "client_id": "cid-1",
+		"client_secret_env": "AKV_SECRET",
+	}
+	for k, v := range want {
+		if prod[k] != v {
+			t.Errorf("prod[%q] = %q, want %q (field stripped by add/remove round-trip)", k, prod[k], v)
+		}
+	}
+}
+
+// TestCAKeysAddSoloCamposDeFlags verifies that a new entry contains exactly
+// the fields provided via flags: no empty key_version/tenant_id/... appear.
+func TestCAKeysAddSoloCamposDeFlags(t *testing.T) {
+	t.Parallel()
+	b := mustMarshalCAKey(t, caKeyEntry{Type: "akv", VaultURL: "https://v.vault.azure.net", KeyName: "ca"})
+	var fields map[string]any
+	if err := json.Unmarshal(b, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 3 {
+		t.Errorf("expected exactly 3 fields (type, vault_url, key_name), got %v", fields)
 	}
 }
 
@@ -941,5 +1071,141 @@ func TestCommandPolicyNilWhenHostHasNone(t *testing.T) {
 	}
 	if label := commandPolicyLabel(hosts["web01"].CommandPolicy); label != "—" {
 		t.Errorf("commandPolicyLabel for nil = %q, want —", label)
+	}
+}
+
+// ── splitHostPortDefault tests ────────────────────────────────────────────────
+
+func TestSplitHostPortDefault(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		addr     string
+		wantHost string
+		wantPort string
+		wantErr  bool
+	}{
+		{"host-port", "10.0.0.1:22", "10.0.0.1", "22", false},
+		{"host-custom-port", "web01.example.com:2222", "web01.example.com", "2222", false},
+		{"bare-host", "web01.example.com", "web01.example.com", "22", false},
+		{"bare-ipv4", "10.0.0.1", "10.0.0.1", "22", false},
+		{"ipv6-bracketed-port", "[2001:db8::1]:2222", "2001:db8::1", "2222", false},
+		{"ipv6-bracketed-no-port", "[2001:db8::1]", "2001:db8::1", "22", false},
+		{"ipv6-bare", "2001:db8::1", "2001:db8::1", "22", false},
+		{"empty-port", "web01:", "web01", "22", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			host, port, err := splitHostPortDefault(tc.addr)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("splitHostPortDefault(%q): expected error", tc.addr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("splitHostPortDefault(%q): %v", tc.addr, err)
+			}
+			if host != tc.wantHost || port != tc.wantPort {
+				t.Errorf("splitHostPortDefault(%q) = (%q, %q), want (%q, %q)",
+					tc.addr, host, port, tc.wantHost, tc.wantPort)
+			}
+		})
+	}
+}
+
+// ── mergeUnsetHostFields tests ────────────────────────────────────────────────
+
+// existingHostFixture returns a fully populated host entry, as stored in
+// signer.json before a --force update.
+func existingHostFixture() hostEntry {
+	return hostEntry{
+		Addr:             "10.0.0.1:22",
+		User:             "ubuntu",
+		HostKey:          "ssh-ed25519 OLD",
+		Jump:             "bastion01",
+		Principal:        "host:custom",
+		SourceAddress:    "10.0.0.0/24",
+		MaxTTLSeconds:    300,
+		AllowAsBastion:   true,
+		AllowedCallers:   []string{"broker-prod"},
+		AllowSudo:        true,
+		AllowedSudoUsers: []string{"root", "deploy"},
+		AllowPTY:         true,
+		Groups:           []string{"prod"},
+	}
+}
+
+// TestMergeUnsetHostFieldsPreservaCampos is a regression test: a --force
+// update must start from the existing entry and override only the fields
+// whose flags were explicitly set.
+func TestMergeUnsetHostFieldsPreservaCampos(t *testing.T) {
+	t.Parallel()
+	existing := existingHostFixture()
+
+	// Simulate: host add --name web01 --addr ... --user ... --host-key NEW
+	// --ttl 600 --force  (only addr/user/host-key/ttl explicitly set).
+	hp := hostEntry{
+		Addr:          "10.0.0.2:22",
+		User:          "admin",
+		HostKey:       "ssh-ed25519 NEW",
+		Principal:     "host:web01", // default computed from --name
+		MaxTTLSeconds: 600,
+	}
+	set := map[string]bool{"name": true, "addr": true, "user": true, "host-key": true, "ttl": true, "force": true}
+	mergeUnsetHostFields(&hp, existing, set)
+
+	// Explicitly set flags must win.
+	if hp.Addr != "10.0.0.2:22" || hp.User != "admin" || hp.HostKey != "ssh-ed25519 NEW" || hp.MaxTTLSeconds != 600 {
+		t.Errorf("explicitly set fields must override: %+v", hp)
+	}
+	// Every unset field must be preserved from the existing entry.
+	if hp.Principal != "host:custom" {
+		t.Errorf("Principal = %q, want host:custom (preserved)", hp.Principal)
+	}
+	if hp.Jump != "bastion01" || hp.SourceAddress != "10.0.0.0/24" {
+		t.Errorf("Jump/SourceAddress not preserved: %+v", hp)
+	}
+	if !hp.AllowAsBastion || !hp.AllowSudo || !hp.AllowPTY {
+		t.Errorf("bool fields not preserved: %+v", hp)
+	}
+	if len(hp.AllowedSudoUsers) != 2 || len(hp.Groups) != 1 || len(hp.AllowedCallers) != 1 {
+		t.Errorf("list fields not preserved: %+v", hp)
+	}
+}
+
+// TestMergeUnsetHostFieldsVacioExplicitoSobrescribe verifies that a flag
+// explicitly set to empty (e.g. --groups "") clears the field: flag.Visit
+// fires for it, so it must not be merged from the existing entry.
+func TestMergeUnsetHostFieldsVacioExplicitoSobrescribe(t *testing.T) {
+	t.Parallel()
+	existing := existingHostFixture()
+
+	// Simulate: --groups "" --jump "" --sudo=false explicitly set.
+	hp := hostEntry{
+		Addr:    "10.0.0.1:22",
+		User:    "ubuntu",
+		HostKey: "ssh-ed25519 OLD",
+	}
+	set := map[string]bool{
+		"name": true, "addr": true, "user": true, "host-key": true,
+		"groups": true, "jump": true, "sudo": true,
+	}
+	mergeUnsetHostFields(&hp, existing, set)
+
+	if hp.Groups != nil {
+		t.Errorf("Groups = %v, want nil (explicit empty must clear)", hp.Groups)
+	}
+	if hp.Jump != "" {
+		t.Errorf("Jump = %q, want empty (explicit empty must clear)", hp.Jump)
+	}
+	if hp.AllowSudo {
+		t.Error("AllowSudo must be false (--sudo=false explicitly set)")
+	}
+	// Untouched fields still preserved.
+	if hp.Principal != "host:custom" || hp.MaxTTLSeconds != 300 || !hp.AllowPTY {
+		t.Errorf("unset fields must be preserved: %+v", hp)
 	}
 }

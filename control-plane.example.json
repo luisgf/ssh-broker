@@ -26,11 +26,14 @@
     "approval_url_template": ""
   },
 
-  "_behavior_comment": "Per-agent behaviour guardrails (subject = OIDC end user if present, otherwise broker CN). mode: 'off' (default) | 'observe' (audits anomalies only) | 'enforce' (anomalies escalate to human approval; rate exceeded is denied with 429). Anomalies: rate spike, host never used before by that agent, command outside its history (fingerprint = first token). rate_limit_per_min: maximum requests per subject per minute (0 = no limit). State is in-memory; restarting the control plane resets the baseline.",
+  "_behavior_comment": "Per-agent behaviour guardrails. The subject is the authenticated broker CN; it is qualified as '<broker CN>:<end_user>' only when the broker CN is listed in trusted_forwarders below (end_user is an unauthenticated request field — keying on it directly would let a client evade rate limits and anomaly detection by rotating it). mode: 'off' (default) | 'observe' (audits anomalies only) | 'enforce' (anomalies escalate to human approval; rate exceeded is denied with 429). Anomalies: rate spike, host never used before by that agent, command outside its history (fingerprint = first token). rate_limit_per_min: maximum requests per subject per minute (0 = no limit). State is in-memory; restarting the control plane resets the baseline.",
   "behavior": {
     "mode": "observe",
     "rate_limit_per_min": 60
   },
+
+  "_trusted_forwarders_comment": "Broker client cert CNs whose end_user claim is trusted (brokers that authenticate end users, e.g. via OIDC). Mirrors trusted_forwarders in signer.json. Only for these CNs do the behaviour guardrails key on '<broker CN>:<end_user>'; for any other CN the end_user field is ignored and the broker CN alone is used. Empty/absent = end_user never qualifies the subject.",
+  "trusted_forwarders": [],
 
   "audit_log": "control_plane_audit.log",
   "audit_key": "pki/control_plane_audit.seed"

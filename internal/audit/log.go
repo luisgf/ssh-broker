@@ -133,7 +133,10 @@ func (l *Log) restoreChain() error {
 
 // maybeRotate rotates the log if it exceeds maxFileSize. Must be called under
 // l.mu. L2: creates a file with a timestamp suffix and opens a new one. The
-// new file's chain starts from zero.
+// new file's chain seeds from the rotated file's last hash: its first entry
+// carries prev_hash = hash of the previous file's last line, so deleting or
+// truncating files at rotation boundaries is detectable. Seq restarts per
+// file; integrity rests on the prev_hash chain.
 func (l *Log) maybeRotate() {
 	if l.maxFileSize <= 0 {
 		return
@@ -159,8 +162,9 @@ func (l *Log) maybeRotate() {
 		return
 	}
 	l.f = f
+	// Carry l.prevHash over: the new file's first entry links to the rotated
+	// file's last line, preserving chain continuity across files.
 	l.seq = 0
-	l.prevHash = ""
 	log.Printf("audit log rotated: %s → %s", l.path, rotPath)
 }
 
