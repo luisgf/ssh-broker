@@ -1,5 +1,81 @@
 # Changelog
 
+## [v1.12.6] - 2026-06-13
+
+Second batch from the logic-flaw review (v1.12.5 shipped the two signer
+firewall bypasses). Fixes across sessions, the SSH layer, the control plane,
+the audit chain, and `broker-ctl`/CA.
+
+### Security
+- **Behaviour guardrails key on the authenticated broker CN, not the
+  client-supplied `end_user`.** The control plane keyed its rate limit and
+  anomaly baselines on `end_user`, an unauthenticated JSON field, so a client
+  could rotate it to get a fresh window / first-seen baseline on every request.
+  New **`trusted_forwarders`** config (control-plane): only for CNs in that
+  list does `end_user` qualify the subject (`<broker CN>:<end_user>`); every
+  other CN is keyed on the broker CN alone. See [THREAT_MODEL.md](THREAT_MODEL.md)
+  non-goal #2.
+- **No self-approval.** The originator of an approval request can no longer
+  approve or deny it (four-eyes), even if its CN is in `approval.callers`; the
+  attempt is audited as `self-approval-rejected`.
+- **Audit hash chain is continuous across rotation.** `maybeRotate` reset the
+  chain to zero, so deleting or truncating a file at a rotation boundary was
+  undetectable. The first entry of each rotated-to file now carries
+  `prev_hash` = hash of the previous file's last line. `broker-ctl audit
+  verify` treats a first-line `prev_hash` as the chain seed.
+
+### Fixed
+- **`broker-ctl audit verify --key` no longer reports false signature
+  failures.** The CLI re-implemented the signed entry struct and was missing
+  five signed fields (`policy_rule`, `dry_run`, `approval_id`, `approved_by`,
+  `anomaly`), so any entry with one populated (denials, approvals, anomalies)
+  verified as invalid. It now uses `internal/audit.Entry` directly; `show` /
+  `tail` also render those fields.
+- **`broker-ctl ca-keys add/remove` preserves all fields.** The command
+  mirrored only 4 of the 7 `ca_keys` fields and re-serialised the whole map,
+  silently dropping `key_version`, `tenant_id`, `client_id`, and
+  `client_secret_env` from every entry (breaking AKV service-principal auth).
+  It now edits only the touched entry as raw JSON.
+- **Session reaper no longer kills a session with a command in flight.** The
+  idle TTL (5 min) could fire under a longer exec (10 min cap), closing the
+  connection mid-command. A busy counter protects in-flight sessions; the idle
+  clock now counts from command completion.
+- **Shell sessions fail fast after a desync.** After an exec timeout or output
+  overflow, the per-session end-of-output marker was left in flight and the
+  *next* exec returned the previous command's output and exit code (also
+  corrupting the audit trail). Such a session is now marked broken and every
+  later exec errors asking the caller to reopen it.
+- **Output over the 10 MiB cap is truncated, not failed.** `limitedWriter` /
+  `syncBuf` returned a short write at the cap, which aborted the SSH `io.Copy`
+  with `ErrShortWrite` — erroring the command or stalling it until the 10-min
+  timeout. They now consume all bytes, discard the overflow, and return the
+  truncated output with a marker.
+- **AKV signer pins the key version at startup.** With `key_version` empty it
+  resolved "latest" on every `Sign` call; after a Key Vault rotation, certs
+  were signed by the new version while the cached public key (and the cert's
+  `SignatureKey`) was the old one, so sshd rejected them all. The version is
+  now pinned from the KID returned at startup (rotation requires a signer
+  reload/restart).
+- **Intermediate ProxyJump hop dials are time-bounded.** Only the first hop had
+  a dial timeout; a dead bastion could hang a connect indefinitely. Every hop's
+  dial is now bounded by the request context plus a per-hop timeout, and the
+  context is cancellable.
+- **`broker-ctl host add --scan` honours the port** in `--addr` (passes
+  `ssh-keyscan -p`) and handles IPv6 literals; it previously keyscanned port 22
+  regardless, risking a wrong/hostile host key at onboarding.
+- **`broker-ctl host add --force` preserves unspecified fields.** A `--force`
+  update reset every field not given as a flag (sudo, groups, callers, TTL) to
+  defaults; it now starts from the existing entry and overrides only the flags
+  explicitly set.
+- **Per-session goroutine leak removed.** `shellReader` blocked forever on its
+  channel after a session closed; it now exits on a done signal.
+- **Reaper close/audit moved outside the session-manager lock**, so a slow disk
+  or a hung connection close no longer stalls all other session operations.
+
+### Added
+- Control-plane config field **`trusted_forwarders`** (list of broker CNs);
+  documented in `control-plane.example.json`.
+
 ## [v1.12.5] - 2026-06-13
 
 ### Security

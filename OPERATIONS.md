@@ -189,18 +189,24 @@ broker-ctl host remove web01
 | `--groups` | | — | RBAC groups (comma-separated) |
 | `--callers` | | — | CNs allowed on this host (comma-separated) |
 | `--bastion` | | false | `allow_as_bastion=true` |
-| `--force` | | false | Overwrite if it exists (preserves CommandPolicy unless a policy flag is given) |
+| `--force` | | false | Update if it exists, preserving every field whose flag you don't pass (see note) |
 | `--policy-mode` | | — | `allowlist` \| `denylist` \| `off` |
 | `--allow` | | — | Allowlist patterns (RE2 regex, comma-separated) |
 | `--deny` | | — | Denylist patterns (RE2 regex, comma-separated) |
 | `--require-approval` | | — | Require-approval patterns (RE2 regex, comma-separated) |
 | `--shell-parse` | | false | Parse commands as POSIX sh before evaluating the policy |
 
-\* Either `--host-key` or `--scan` is required, but not both.
+\* Either `--host-key` or `--scan` is required, but not both. `--scan` honours
+the port in `--addr` (and IPv6 literals).
 
-> **CommandPolicy preservation:** with `--force` and no policy flag, the host's
-> existing `command_policy` is copied to the new entry. To clear it, use
-> `--policy-mode off`.
+> **Partial update with `--force` (v1.12.6):** a `--force` update starts from
+> the existing entry and overrides **only** the fields whose flags you pass; any
+> field you omit (sudo, groups, callers, TTL, `command_policy`, …) keeps its
+> current value. So `host add --name web01 --addr newip:22 --user deploy --scan
+> --force` changes just the address and leaves sudoers/groups/policy intact. A
+> flag set explicitly to empty (`--groups ""`, `--sudo=false`) still clears its
+> field. (`--addr`, `--user`, and `--host-key`/`--scan` are always required and
+> thus always written.)
 
 ### CA keys
 
@@ -345,7 +351,7 @@ it must be revoked before expiry.
 | `config.example.json` | Reference with local + remote modes; `allow_sudo`/`allow_pty`/`command_policy`/`approval_wait_seconds` |
 | `signer.json` | Active signer config (single source of truth for hosts) |
 | `signer.example.json` | Reference with per-host `allow_sudo`/`allowed_sudo_users`/`allow_pty`/`groups`/`command_policy` + `callers` + `trusted_forwarders` |
-| `control-plane.example.json` | Control plane reference: `signer` block, `approval` (notifier/callers/timeout), `behavior`, mTLS |
+| `control-plane.example.json` | Control plane reference: `signer` block, `approval` (notifier/callers/timeout), `behavior`, `trusted_forwarders`, mTLS |
 | `deploy/sshd_config.snippet` | `sshd_config` fragment + NOPASSWD sudoers for managed hosts |
 
 ### Common operational notes

@@ -291,10 +291,12 @@ consumed once and purged 2×TTL after creation (v1.12.0).
 **Behavior guardrails + rate limiting (v1.7.0, Phase C).**
 `internal/control/behavior.go`: a per-subject in-memory tracker detecting rate
 spikes, never-before-used hosts, and out-of-history commands (first-token
-fingerprint). Subject = OIDC end user if present, else broker CN. Modes
-(`behavior.mode`): `off` / `observe` (audits `anomaly`, never blocks) /
-`enforce` (anomalies escalate to approval; rate excess → 429). **Caveat:** the
-subject is broker-asserted, so behavior is detection, not containment — see
+fingerprint). Subject = the authenticated **broker CN**; the OIDC end user only
+qualifies the subject (`<broker CN>:<end_user>`) when the broker CN is in the
+control plane's `trusted_forwarders` (v1.12.6). Modes (`behavior.mode`): `off` /
+`observe` (audits `anomaly`, never blocks) / `enforce` (anomalies escalate to
+approval; rate excess → 429). **Caveat:** for trusted forwarders the `end_user`
+half is still broker-asserted, so behavior is detection, not containment — see
 THREAT_MODEL.md.
 
 **Extensible notification & approval (v1.8.0 + Phase 2 pending).**
